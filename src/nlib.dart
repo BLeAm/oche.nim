@@ -2,6 +2,12 @@ import 'dart:ffi' as ffi;
 import 'package:ffi/ffi.dart';
 
 final dynlib = ffi.DynamicLibrary.open('./libmain.so');
+
+// --- Memory: free Nim-allocated C strings ---
+typedef _OcheFreeCStringNative = ffi.Void Function(ffi.Pointer<Utf8>);
+typedef _OcheFreeCStringDart = void Function(ffi.Pointer<Utf8>);
+final _ocheFreeCString = dynlib.lookupFunction<_OcheFreeCStringNative, _OcheFreeCStringDart>('ocheFreeCString');
+
   // --- add ---
   typedef NAddNative = ffi.Int64 Function(ffi.Int64, ffi.Int64);
   typedef NAddDart = int Function(int, int);
@@ -42,5 +48,10 @@ final dynlib = ffi.DynamicLibrary.open('./libmain.so');
   typedef NGreetDart = ffi.Pointer<Utf8> Function(ffi.Pointer<Utf8>);
   final ngreetCall = dynlib.lookupFunction<NGreetNative, NGreetDart>('greet');
   String greet(String name) {
-    return ngreetCall(name.toNativeUtf8()).toDartString();
+    return using((arena) {
+      final _ret = ngreetCall(name.toNativeUtf8(allocator: arena));
+      final _dartStr = _ret.toDartString();
+      _ocheFreeCString(_ret);
+      return _dartStr;
+    });
   }

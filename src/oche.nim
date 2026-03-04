@@ -40,27 +40,27 @@ macro oche*(body: untyped): untyped =
 # ─── Type Mapping ─────────────────────────────────────────────────────────────
 
 proc toNativeFfi(t: string): string =
-  ## Nim type → C FFI type (used in the Native typedef)
+  ## Nim type → raw C FFI type (used in the Native typedef)
   case t
-  of "int":             "ffi.Int64"
-  of "int8":            "ffi.Int8"
-  of "int16":           "ffi.Int16"
-  of "int32":           "ffi.Int32"
-  of "int64":           "ffi.Int64"
-  of "uint", "uint64":  "ffi.Uint64"
-  of "uint8":           "ffi.Uint8"
-  of "uint16":          "ffi.Uint16"
-  of "uint32":          "ffi.Uint32"
-  of "float", "float64":"ffi.Double"
-  of "float32":         "ffi.Float"
-  of "bool":            "ffi.Bool"
+  of "int":               "ffi.Int64"
+  of "int8":              "ffi.Int8"
+  of "int16":             "ffi.Int16"
+  of "int32":             "ffi.Int32"
+  of "int64":             "ffi.Int64"
+  of "uint", "uint64":    "ffi.Uint64"
+  of "uint8":             "ffi.Uint8"
+  of "uint16":            "ffi.Uint16"
+  of "uint32":            "ffi.Uint32"
+  of "float", "float64":  "ffi.Double"
+  of "float32":           "ffi.Float"
+  of "bool":              "ffi.Bool"
   of "cstring", "string": "ffi.Pointer<Utf8>"
-  of "void", "":        "ffi.Void"
-  else:                 "ffi.Void"
+  of "void", "":          "ffi.Void"
+  else:                   "ffi.Void"
 
 proc toDartFfi(t: string): string =
-  ## Nim type → Dart FFI type used inside the Dart typedef.
-  ## Dart FFI requires Dart-native scalar types (int/double/bool) here,
+  ## Nim type → Dart-compatible FFI type (used in the Dart typedef).
+  ## Dart FFI requires scalar Dart types here (int/double/bool),
   ## but Pointer types stay as-is.
   case t
   of "int", "int8", "int16", "int32", "int64",
@@ -82,18 +82,15 @@ proc toDart(t: string): string =
   of "void", "":          "void"
   else:                   "void"
 
-proc toFfiArg(name, typ: string): string =
-  ## Converts a user-facing Dart argument to the raw FFI value the native fn expects
-  case typ
-  of "cstring", "string": fmt"{name}.toNativeUtf8()"
-  else:                   name
+proc isStringType(t: string): bool =
+  t in ["string", "cstring"]
 
-proc wrapReturn(call, retType: string): string =
-  ## Wraps the raw FFI call into a user-friendly Dart return statement
-  case retType
-  of "cstring", "string": fmt"return {call}.toDartString();"
-  of "void", "":          fmt"{call};"
-  else:                   fmt"return {call};"
+proc toFfiArg(name, typ: string): string =
+  ## Converts a wrapper arg to what the FFI call expects.
+  ## String args get .toNativeUtf8(allocator: arena) — requires a
+  ## surrounding using() block in the generated code.
+  if isStringType(typ): fmt"{name}.toNativeUtf8(allocator: arena)"
+  else: name
 
 # ─── Code Generation ──────────────────────────────────────────────────────────
 
@@ -108,30 +105,55 @@ proc genDInterface(obj: OcheObject): string =
     dartFfiRetType = toDartFfi(obj.retType)
     dartRetType    = toDart(obj.retType)
 
-    # Native typedef — raw C types (ffi.Int64, ffi.Double, ffi.Bool, ...)
-    nativeParams   = obj.params.mapIt(toNativeFfi(it.typ)).join(", ")
-    # Dart typedef  — Dart-compatible FFI types (int, double, bool, Pointer<Utf8>)
-    dartFfiParams  = obj.params.mapIt(toDartFfi(it.typ)).join(", ")
+    # Native typedef: raw C types
+    nativeParams  = obj.params.mapIt(toNativeFfi(it.typ)).join(", ")
+    # Dart typedef: Dart-native scalar types (int/double/bool/Pointer)
+    dartFfiParams = obj.params.mapIt(toDartFfi(it.typ)).join(", ")
+    # Wrapper signature: user-friendly types (int/double/bool/String)
+    wrapperParams = obj.params.mapIt(fmt"{toDart(it.typ)} {it.name}").join(", ")
 
-    # wrapper function: user-friendly param list ("int x, String s, ...")
-    wrapperParams  = obj.params.mapIt(fmt"{toDart(it.typ)} {it.name}").join(", ")
+    hasStringParam  = obj.params.anyIt(isStringType(it.typ))
+    hasStringReturn = isStringType(obj.retType)
+    isVoidReturn    = obj.retType in ["void", ""]
 
-    # args forwarded to the underlying FFI call (with conversions where needed)
     callArgs = obj.params.mapIt(toFfiArg(it.name, it.typ)).join(", ")
+    rawCall  = fmt"{callName}({callArgs})"
 
-  let
-    call = fmt"{callName}({callArgs})"
-    body = wrapReturn(call, obj.retType)
+  # ── Build the inner body lines (go inside function or using-block) ──────────
+  var inner: seq[string]
+  if hasStringReturn:
+    # Get the raw pointer, copy to Dart string, then free the Nim allocation
+    inner.add fmt"final _ret = {rawCall};"
+    inner.add "final _dartStr = _ret.toDartString();"
+    inner.add "_ocheFreeCString(_ret);"
+    inner.add "return _dartStr;"
+  elif isVoidReturn:
+    inner.add fmt"{rawCall};"
+  else:
+    inner.add fmt"return {rawCall};"
 
-  fmt"""
-  // --- {obj.name} ---
-  typedef {nativeName} = {nativeRetType} Function({nativeParams});
-  typedef {dartName} = {dartFfiRetType} Function({dartFfiParams});
-  final {callName} = dynlib.lookupFunction<{nativeName}, {dartName}>('{obj.name}');
-  {dartRetType} {obj.name}({wrapperParams}) {{
-    {body}
-  }}
-"""
+  # ── Assemble the full function ──────────────────────────────────────────────
+  var lines: seq[string]
+  lines.add fmt"  // --- {obj.name} ---"
+  lines.add fmt"  typedef {nativeName} = {nativeRetType} Function({nativeParams});"
+  lines.add fmt"  typedef {dartName} = {dartFfiRetType} Function({dartFfiParams});"
+  lines.add fmt"  final {callName} = dynlib.lookupFunction<{nativeName}, {dartName}>('{obj.name}');"
+  lines.add fmt"  {dartRetType} {obj.name}({wrapperParams}) {{"
+
+  if hasStringParam:
+    # Wrap in using() so the Arena frees toNativeUtf8() allocations on exit
+    let retKw = if isVoidReturn and not hasStringReturn: "" else: "return "
+    lines.add fmt"    {retKw}using((arena) {{"
+    for ln in inner:
+      lines.add "      " & ln          # 6 spaces inside using block
+    lines.add "    });"
+  else:
+    for ln in inner:
+      lines.add "    " & ln            # 4 spaces inside plain function body
+
+  lines.add "  }"
+  lines.add ""
+  lines.join("\n")
 
 macro generate*(output: varargs[untyped]): untyped =
   let
@@ -142,8 +164,21 @@ macro generate*(output: varargs[untyped]): untyped =
 import 'package:ffi/ffi.dart';
 
 final dynlib = ffi.DynamicLibrary.open('./{libname}');
+
+// --- Memory: free Nim-allocated C strings ---
+typedef _OcheFreeCStringNative = ffi.Void Function(ffi.Pointer<Utf8>);
+typedef _OcheFreeCStringDart = void Function(ffi.Pointer<Utf8>);
+final _ocheFreeCString = dynlib.lookupFunction<_OcheFreeCStringNative, _OcheFreeCStringDart>('ocheFreeCString');
+
 """
   for obj in ooBanks:
     code &= genDInterface(obj)
 
   writeFile(output[0].strVal, code)
+
+  # Auto-inject ocheFreeCString into the compiled shared library.
+  # Users don't need to write this themselves.
+  result = quote do:
+    proc ocheFreeCString(p: pointer) {.exportc, dynlib.} =
+      if not p.isNil:
+        dealloc(p)

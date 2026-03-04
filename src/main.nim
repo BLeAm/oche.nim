@@ -16,6 +16,11 @@ proc isEven(n: int): bool {.oche.} =
   n mod 2 == 0
 
 proc greet(name: cstring): cstring {.oche.} =
-  ("Hello, " & $name).cstring
+  # Allocate on the C heap so Dart can safely hold this pointer.
+  # Nim's ORC GC won't touch this — Dart must free it via ocheFreeCString.
+  let s = "Hello, " & $name
+  let buf = cast[cstring](alloc0(s.len + 1))
+  copyMem(buf, s.cstring, s.len + 1)
+  buf
 
 generate("nlib.dart")
