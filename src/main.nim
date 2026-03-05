@@ -3,34 +3,48 @@ import std/options
 import os
 
 type
+  # บังคับขนาดให้เป็น 4 bytes เพื่อให้ตรงกับ Dart ffi.Int32() และป้องกัน Alignment Shift
   UserRole {.oche.} = enum
     Admin, Editor, Viewer
 
+  Point {.oche.} = object
+    x, y: float
+
   User {.oche.} = object
     id: int
-    role: UserRole
+    name: cstring
+    status: UserRole
+    position: Point
 
 proc greet(name: string): string {.oche.} =
-  if name == "": raise newException(ValueError, "ชื่อห้ามว่าง!")
-  "Hello, " & name
+  if name == "": raise newException(ValueError, "Name cannot be empty!")
+  return "Greetings, " & name & " from Nim!"
 
-proc checkAccess(user: User): string {.oche.} =
-  case user.role
-  of Admin: "Full access granted"
-  of Editor: "Can update content"
-  of Viewer: "Read only"
+proc getMultipliers(base: int, count: int): seq[int] {.oche.} =
+  result = @[]
+  for i in 1..count:
+    result.add(base * i)
 
-proc slowCompute(n: int): int {.oche.} =
-  os.sleep(1000)
-  n * n
+proc sumPoints(points: seq[Point]): float {.oche.} =
+  result = 0
+  for p in points:
+    result += (p.x + p.y)
 
-# --- Optional Support Test ---
-proc getScore(name: string): Option[float] {.oche.} =
-  if name == "Bleamz": some(99.9)
-  else: none(float)
+proc findUserById(id: int): Option[User] {.oche.} =
+  if id == 42:
+    some(User(id: 42, name: "Master Bleamz", status: Admin, position: Point(x: 1.1, y: 2.2)))
+  else:
+    none(User)
 
-proc findUserId(name: string): Option[int] {.oche.} =
-  if name == "Admin": some(1)
-  else: none(int)
+proc isPrime(n: int): bool {.oche.} =
+  if n <= 1: return false
+  for i in 2 ..< n:
+    if n mod i == 0: return false
+  return true
 
+proc heavyTask(seconds: int): string {.oche.} =
+  sleep(seconds * 1000)
+  return "Heavy task finished after " & $seconds & "s"
+
+# Generate Dart code
 generate("nlib.dart")

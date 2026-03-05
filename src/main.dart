@@ -1,32 +1,42 @@
 import 'nlib.dart';
 
 void main() async {
-  print("--- 🌌 Oche Absolute Ultimate Test 🌌 ---");
+  print("==========================================");
+  print("   🦅 OCHE PURE DART EXPERIENCE 🦅   ");
+  print("==========================================\n");
 
-  // 1. ทดสอบ Optional (Nullability)
-  print("\n1. Testing Optional Support:");
+  // 1. เรียกฟังก์ชันปกติ (ใช้ UserRole.Admin ตามที่แก้ใน Nim)
+  print("1. [Friendly Objects]");
+  final user = User(
+    id: 101,
+    name: "Dart Hero",
+    status: UserRole.Admin,
+    position: Point(x: 100.0, y: 200.0),
+  );
+  print(
+    "   Created Dart Object: ${user.name} at (${user.position.x}, ${user.position.y})",
+  );
 
-  final score1 = getScore("Bleamz");
-  print("  getScore('Bleamz') = $score1 (Expect: 99.9)");
+  // 2. ส่ง List ของออบเจกต์ปกติ
+  print("\n2. [Automatic Mapping]");
+  final points = [Point(x: 1, y: 1), Point(x: 2, y: 2), Point(x: 3, y: 3)];
+  final totalSum = sumPoints(points);
+  print("   Sum of 3 points: $totalSum");
 
-  final score2 = getScore("Unknown");
-  print("  getScore('Unknown') = $score2 (Expect: null)");
+  // 3. รับออบเจกต์กลับจาก Nim (ข้อมูลถูก copy มาแล้ว ปลอดภัย 100%)
+  print("\n3. [Safe Returns]");
+  final result42 = findUserById(42);
+  if (result42 != null) {
+    print("   Found User 42: ${result42.name}, Status: ${result42.status}");
+    print("   Position: (${result42.position.x}, ${result42.position.y})");
+  }
 
-  final id1 = await findUserIdAsync("Admin");
-  print("  findUserIdAsync('Admin') = $id1 (Expect: 1)");
+  // 4. Async
+  print("\n4. [Async Isolation]");
+  final asyncRes = await heavyTaskAsync(1);
+  print("   Async Result: $asyncRes");
 
-  final id2 = await findUserIdAsync("Guest");
-  print("  findUserIdAsync('Guest') = $id2 (Expect: null)");
-
-  // 2. ทดสอบ Async (Isolate)
-  print("\n2. Testing Async/Isolate:");
-  final stopwatch = Stopwatch()..start();
-  print("  [Dart] Calling slowComputeAsync...");
-  final fut = slowComputeAsync(10);
-  print("  [Dart] Doing other work...");
-  final res = await fut;
-  print("  [Nim] slowCompute Result: $res");
-  print("  [Dart] Total time: ${stopwatch.elapsedMilliseconds}ms");
-
-  print("\n--- ✅ Mission 100% Accomplished ---");
+  print("\n==========================================");
+  print("     ✅ NO FFI IMPORTS IN USER CODE!      ");
+  print("==========================================");
 }
