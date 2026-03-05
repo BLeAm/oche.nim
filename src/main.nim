@@ -1,26 +1,34 @@
 import oche
 
-proc add(a, b: int): int {.oche.} =
-  a + b
+type
+  User {.oche.} = object
+    id: int
+    score: float
 
-proc mul(a, b: int): int {.oche.} =
-  a * b
+  People {.oche.} = object
+    id: int
+    age: int
 
-proc tdiv(a, b, c: int): int {.oche.} =
-  a div b
+  Employer {.oche.} = object
+    secretary: People
 
-proc addFloat(a, b: float): float {.oche.} =
-  a + b
+proc add(a, b: int): int {.oche.} = a + b
 
-proc isEven(n: int): bool {.oche.} =
-  n mod 2 == 0
+proc sum(vals: seq[int]): int {.oche.} =
+  for v in vals: result += v
 
-proc greet(name: cstring): cstring {.oche.} =
-  # Allocate on the C heap so Dart can safely hold this pointer.
-  # Nim's ORC GC won't touch this — Dart must free it via ocheFreeCString.
-  let s = "Hello, " & $name
-  let buf = cast[cstring](alloc0(s.len + 1))
-  copyMem(buf, s.cstring, s.len + 1)
-  buf
+proc getRange(n: int): seq[int] {.oche.} =
+  for i in 0 ..< n: result.add i
+
+proc getTopPlayers(): seq[User] {.oche.} =
+  result.add User(id: 1, score: 99.5)
+  result.add User(id: 2, score: 88.0)
+
+proc createEmployer(id, age: int): Employer {.oche.} =
+  result.secretary.id = id
+  result.secretary.age = age
+
+proc greet(name: string): string {.oche.} =
+  "Hello, " & name # Seamless String!
 
 generate("nlib.dart")
