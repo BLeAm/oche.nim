@@ -1,22 +1,32 @@
 import 'nlib.dart';
 
-void main() {
-  print("--- Basic Types ---");
-  print("add(10, 20) = ${add(10, 20)}");
-  print("greet('Antigravity') = ${greet('Antigravity')}");
+void main() async {
+  print("--- 🌌 Oche Absolute Ultimate Test 🌌 ---");
 
-  print("\n--- Sequences ---");
-  print("getRange(5) = ${getRange(5)}");
-  print("sum([1, 2, 3]) = ${sum([1, 2, 3])}");
+  // 1. ทดสอบ Optional (Nullability)
+  print("\n1. Testing Optional Support:");
 
-  print("\n--- Nested Objects ---");
-  final emp = createEmployer(101, 30);
-  print("Employer's Secretary ID: ${emp.secretary.id}");
-  print("Employer's Secretary Age: ${emp.secretary.age}");
+  final score1 = getScore("Bleamz");
+  print("  getScore('Bleamz') = $score1 (Expect: 99.9)");
 
-  print("\n--- List of Objects ---");
-  final players = getTopPlayers();
-  for (var p in players) {
-    print("Player ID: ${p.id}, Score: ${p.score}");
-  }
+  final score2 = getScore("Unknown");
+  print("  getScore('Unknown') = $score2 (Expect: null)");
+
+  final id1 = await findUserIdAsync("Admin");
+  print("  findUserIdAsync('Admin') = $id1 (Expect: 1)");
+
+  final id2 = await findUserIdAsync("Guest");
+  print("  findUserIdAsync('Guest') = $id2 (Expect: null)");
+
+  // 2. ทดสอบ Async (Isolate)
+  print("\n2. Testing Async/Isolate:");
+  final stopwatch = Stopwatch()..start();
+  print("  [Dart] Calling slowComputeAsync...");
+  final fut = slowComputeAsync(10);
+  print("  [Dart] Doing other work...");
+  final res = await fut;
+  print("  [Nim] slowCompute Result: $res");
+  print("  [Dart] Total time: ${stopwatch.elapsedMilliseconds}ms");
+
+  print("\n--- ✅ Mission 100% Accomplished ---");
 }

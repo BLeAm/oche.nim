@@ -1,79 +1,78 @@
 import 'dart:ffi' as ffi;
+import 'dart:isolate';
 import 'package:ffi/ffi.dart';
 final dynlib = ffi.DynamicLibrary.open('./libmain.so');
 final _ocheFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFree');
-final class Employer extends ffi.Struct {
-  external People secretary;
-}
-
-final class People extends ffi.Struct {
-  @ffi.Int64() external int id;
-  @ffi.Int64() external int age;
+final _ocheGetError = dynlib.lookupFunction<ffi.Pointer<Utf8> Function(), ffi.Pointer<Utf8> Function()>('ocheGetError');
+void _checkError() { final ptr = _ocheGetError(); if (ptr.address != 0) { final msg = ptr.toDartString(); _ocheFree(ptr); throw Exception('NimError: $msg'); } }
+enum UserRole {
+  Admin,
+  Editor,
+  Viewer,
 }
 
 final class User extends ffi.Struct {
   @ffi.Int64() external int id;
-  @ffi.Double() external double score;
+  @ffi.Int32() external int role;
 }
 
-  typedef NAddNative = ffi.Int64 Function(ffi.Int64, ffi.Int64);
-  typedef NAddDart = int Function(int, int);
-  final naddCall = dynlib.lookupFunction<NAddNative, NAddDart>('add');
-  int add(int a, int b) {
-    return using((arena) {
-  
-    return naddCall(a, b);
-    });
-  }
-  typedef NSumNative = ffi.Int64 Function(ffi.Pointer<ffi.Int64>, ffi.Int64);
-  typedef NSumDart = int Function(ffi.Pointer<ffi.Int64>, int);
-  final nsumCall = dynlib.lookupFunction<NSumNative, NSumDart>('sum');
-  int sum(List<int> vals) {
-    return using((arena) {
-      final _valsPtr = arena.allocate<ffi.Int64>(vals.length * 8);
-    for (var i = 0; i < vals.length; i++) { _valsPtr[i] = vals[i]; }
-    return nsumCall(_valsPtr, vals.length);
-    });
-  }
-  typedef NGetRangeNative = ffi.Pointer<ffi.Void> Function(ffi.Int64);
-  typedef NGetRangeDart = ffi.Pointer<ffi.Void> Function(int);
-  final ngetRangeCall = dynlib.lookupFunction<NGetRangeNative, NGetRangeDart>('getRange');
-  List<int> getRange(int n) {
-    return using((arena) {
-  
-    final _ptr = ngetRangeCall(n);
-    if (_ptr.address == 0) return [];
-    try { final _len = _ptr.cast<ffi.Int64>().value; final _view = ffi.Pointer<ffi.Int64>.fromAddress(_ptr.address + 8).asTypedList(_len); return _view.toList(); } finally { _ocheFree(_ptr); }
-    });
-  }
-  typedef NGetTopPlayersNative = ffi.Pointer<ffi.Void> Function();
-  typedef NGetTopPlayersDart = ffi.Pointer<ffi.Void> Function();
-  final ngetTopPlayersCall = dynlib.lookupFunction<NGetTopPlayersNative, NGetTopPlayersDart>('getTopPlayers');
-  List<User> getTopPlayers() {
-    return using((arena) {
-  
-    final _ptr = ngetTopPlayersCall();
-    if (_ptr.address == 0) return [];
-    try { final _len = _ptr.cast<ffi.Int64>().value; final _dataPtr = ffi.Pointer<User>.fromAddress(_ptr.address + 8); return List<User>.generate(_len, (i) => _dataPtr[i]); } finally { _ocheFree(_ptr); }
-    });
-  }
-  typedef NCreateEmployerNative = Employer Function(ffi.Int64, ffi.Int64);
-  typedef NCreateEmployerDart = Employer Function(int, int);
-  final ncreateEmployerCall = dynlib.lookupFunction<NCreateEmployerNative, NCreateEmployerDart>('createEmployer');
-  Employer createEmployer(int id, int age) {
-    return using((arena) {
-  
-    return ncreateEmployerCall(id, age);
-    });
-  }
-  typedef NGreetNative = ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8>);
-  typedef NGreetDart = ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8>);
-  final ngreetCall = dynlib.lookupFunction<NGreetNative, NGreetDart>('greet');
+  typedef NgreetNative = ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8>);
+  typedef NgreetDart = ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8>);
+  final ngreetCall = dynlib.lookupFunction<NgreetNative, NgreetDart>('greet');
   String greet(String name) {
-    return using((arena) {
-  
-    final _ptr = ngreetCall(name.toNativeUtf8(allocator: arena));
-    if (_ptr.address == 0) return '';
-    try { return _ptr.cast<Utf8>().toDartString(); } finally { _ocheFree(_ptr); }
+    return using((a) {
+
+      final p = ngreetCall(name.toNativeUtf8(allocator: a)); _checkError();
+      if (p.address == 0) return ''; try { return p.cast<Utf8>().toDartString(); } finally { _ocheFree(p); }
     });
   }
+  Future<String> greetAsync(String name) => Isolate.run(() => greet(name));
+  typedef NcheckAccessNative = ffi.Pointer<ffi.Void> Function(User);
+  typedef NcheckAccessDart = ffi.Pointer<ffi.Void> Function(User);
+  final ncheckAccessCall = dynlib.lookupFunction<NcheckAccessNative, NcheckAccessDart>('checkAccess');
+  String checkAccess(User user) {
+    return using((a) {
+
+      final p = ncheckAccessCall(user); _checkError();
+      if (p.address == 0) return ''; try { return p.cast<Utf8>().toDartString(); } finally { _ocheFree(p); }
+    });
+  }
+  Future<String> checkAccessAsync(User user) => Isolate.run(() => checkAccess(user));
+  typedef NslowComputeNative = ffi.Int64 Function(ffi.Int64);
+  typedef NslowComputeDart = int Function(int);
+  final nslowComputeCall = dynlib.lookupFunction<NslowComputeNative, NslowComputeDart>('slowCompute');
+  int slowCompute(int n) {
+    return using((a) {
+
+      final r = nslowComputeCall(n); 
+      _checkError();
+    return r;
+    });
+  }
+  Future<int> slowComputeAsync(int n) => Isolate.run(() => slowCompute(n));
+  typedef NgetScoreNative = ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8>);
+  typedef NgetScoreDart = ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8>);
+  final ngetScoreCall = dynlib.lookupFunction<NgetScoreNative, NgetScoreDart>('getScore');
+  double? getScore(String name) {
+    return using((a) {
+
+      final p = ngetScoreCall(name.toNativeUtf8(allocator: a)); _checkError();
+      if (p.address == 0) return null; try {
+        return p.cast<ffi.Double>().value;
+      } finally { _ocheFree(p); }
+    });
+  }
+  Future<double?> getScoreAsync(String name) => Isolate.run(() => getScore(name));
+  typedef NfindUserIdNative = ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8>);
+  typedef NfindUserIdDart = ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8>);
+  final nfindUserIdCall = dynlib.lookupFunction<NfindUserIdNative, NfindUserIdDart>('findUserId');
+  int? findUserId(String name) {
+    return using((a) {
+
+      final p = nfindUserIdCall(name.toNativeUtf8(allocator: a)); _checkError();
+      if (p.address == 0) return null; try {
+        return p.cast<ffi.Int64>().value;
+      } finally { _ocheFree(p); }
+    });
+  }
+  Future<int?> findUserIdAsync(String name) => Isolate.run(() => findUserId(name));
