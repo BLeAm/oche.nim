@@ -43,8 +43,6 @@ void main() {
     "\n>>> VOILA! Nim sees the change because they share the same memory! 🚀🤝",
   );
 
-  shared.dispose();
-
   print("\n==========================================");
   print("   🔥 BEYOND ZERO-COPY: SHARED CORE 🔥   ");
   print("==========================================");

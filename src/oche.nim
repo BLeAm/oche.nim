@@ -18,6 +18,7 @@ type
     typ:  OcheType
   OcheStruct = object
     name:   string
+    typeId: int
     fields: seq[OcheField]
   OcheEnum = object
     name:   string
@@ -223,7 +224,7 @@ proc genDInterface(obj: OcheObject): string =
     if obj.retType.isSeq or obj.retType.isShared:
       let innerName = obj.retType.inner
       let innerV = if structBanks.hasKey(innerName): innerName & "View" else: toDartType(innerName)
-      actualRetType = "NativeListView<" & innerV & ">"
+      actualRetType = (if obj.retType.isShared: "SharedListView<" else: "NativeListView<") & innerV & ">"
     elif structBanks.hasKey(obj.retType.name):
       actualRetType = obj.retType.name & "View"
 
@@ -234,19 +235,19 @@ proc genDInterface(obj: OcheObject): string =
     let iI = obj.retType.inner; let isC = structBanks.hasKey(iI); let nT = if isC: "N" & iI else: toNativeType(iI)
     let sz = if isC: "ffi.sizeOf<N" & iI & ">()" else: "ffi.sizeOf<" & nT & ">()"
     body = "      final p = " & callName & "(" & callArgs.join(", ") & "); _checkError();\n" &
-           "      return NativeListView<" & (if isC: iI & "View" else: toDartType(iI)) & ">(p, '" & (if isC: iI else: obj.retType.inner) & "', (ptr) => " & (if isC: iI & "View(ptr.cast<N" & iI & ">())" else: "ptr.cast<" & nT & ">().value") & ", " & sz & ");"
+           "      return SharedListView<" & (if isC: iI & "View" else: toDartType(iI)) & ">(p, (ptr) => " & (if isC: iI & "View(ptr.cast<N" & iI & ">())" else: "ptr.cast<" & nT & ">().value") & ", " & sz & ");"
   elif obj.retType.isSeq:
     let iI = obj.retType.inner; let isC = structBanks.hasKey(iI); let nT = if isC: "N" & iI else: toNativeType(iI)
     if obj.isView:
       let sz = if isC: "ffi.sizeOf<N" & iI & ">()" else: "ffi.sizeOf<" & nT & ">()"
       body = "      final p = " & callName & "(" & callArgs.join(", ") & "); _checkError();\n" &
-             "      return NativeListView<" & (if isC: iI & "View" else: toDartType(iI)) & ">(p, '" & (if isC: iI else: obj.retType.inner) & "', (ptr) => " & (if isC: iI & "View(ptr.cast<N" & iI & ">())" else: "ptr.cast<" & nT & ">().value") & ", " & sz & ");"
+             "      return NativeListView<" & (if isC: iI & "View" else: toDartType(iI)) & ">(p, " & (if isC: $structBanks[iI].typeId else: "0") & ", (ptr) => " & (if isC: iI & "View(ptr.cast<N" & iI & ">())" else: "ptr.cast<" & nT & ">().value") & ", " & sz & ");"
     else:
       body = "      final p = " & callName & "(" & callArgs.join(", ") & "); _checkError();\n" &
              "      if (p.address == 0) return []; try {\n" &
              "        final L = ffi.Pointer<ffi.Int64>.fromAddress(p.address).value; final d = ffi.Pointer<" & nT & ">.fromAddress(p.address + 8);\n" &
              (if isC: "        return List<" & iI & ">.generate(L, (i) => " & iI & "._unpack(d[i]));" else: "        return d.asTypedList(L).toList();") & "\n" &
-             "      } finally { using((Arena a) => _ocheFreeDeep(p, 'seq[" & iI & "]'.toNativeUtf8(allocator: a))); }"
+             "      } finally { _ocheFreeDeep(p, " & (if structBanks.hasKey(obj.retType.inner): $structBanks[obj.retType.inner].typeId else: "0") & "); }"
   elif obj.retType.isOption:
     let iI = obj.retType.inner; let isC = structBanks.hasKey(iI); let nTI = if isC: "N" & iI else: toNativeType(iI)
     if obj.isView:
@@ -256,7 +257,7 @@ proc genDInterface(obj: OcheObject): string =
       body = "      final p = " & callName & "(" & callArgs.join(", ") & "); _checkError();\n" &
              "      if (p.address == 0) return null; try {\n" &
              (if isC: "        return " & iI & "._unpack(p.cast<" & nTI & ">().ref);" else: "        return p.cast<" & nTI & ">().value;") & "\n" &
-             "      } finally { using((Arena a) => _ocheFreeDeep(p, 'Option[" & iI & "]'.toNativeUtf8(allocator: a))); }"
+             "      } finally { _ocheFreeDeep(p, " & (if structBanks.hasKey(obj.retType.inner): $structBanks[obj.retType.inner].typeId else: "0") & "); }"
   elif obj.retType.name in ["string", "cstring"]:
     body = "      final p = " & callName & "(" & callArgs.join(", ") & "); _checkError();\n" &
            "      if (p.address == 0) return ''; try { return p.cast<Utf8>().toDartString(); } finally { _ocheFree(p); }"
@@ -285,7 +286,7 @@ proc processOche(body: NimNode, isView: bool): NimNode {.compileTime.} =
     else:
       var f: seq[OcheField] = @[]; let rec = tyNode[2]
       for field in rec: (if field.kind == nnkIdentDefs: (let t = parseType(field[^2]); (for i in 0..<field.len-2: (var fn = field[i]; (if fn.kind == nnkPostfix: fn = fn[1]); f.add OcheField(name: fn.strVal, typ: t)))))
-      structBanks[name] = OcheStruct(name: name, fields: f); return body
+      structBanks[name] = OcheStruct(name: name, typeId: structBanks.len + 1, fields: f); return body
 
   let obj = parseOche(body, isView); ooBanks.add(obj)
   let procName = body[0]; let originalBody = body[6]; var originalRetType = body[3][0]
@@ -354,7 +355,7 @@ macro oche*(arg: untyped, body: untyped): untyped =
   processOche(body, isView)
 
 macro generate*(output: static string): untyped =
-  var code = "import 'dart:ffi' as ffi;\nimport 'dart:isolate';\nimport 'dart:io' show Platform;\nimport 'dart:collection';\nimport 'package:ffi/ffi.dart';\n\nfinal String _libName = Platform.isWindows ? 'libmain.dll' : (Platform.isMacOS ? 'libmain.dylib' : 'libmain.so');\nfinal dynlib = ffi.DynamicLibrary.open('./$_libName');\nfinal _ocheFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFree');\nfinal _ocheFreeDeep = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer, ffi.Pointer<Utf8>), void Function(ffi.Pointer, ffi.Pointer<Utf8>)>('ocheFreeDeep');\nfinal _ocheGetError = dynlib.lookupFunction<ffi.Pointer<Utf8> Function(), ffi.Pointer<Utf8> Function()>('ocheGetError');\nvoid _checkError() { final ptr = _ocheGetError(); if (ptr.address != 0) { final msg = ptr.toDartString(); _ocheFree(ptr); throw Exception('NimError: $msg'); } }\n"
+  var code = "import 'dart:ffi' as ffi;\nimport 'dart:isolate';\nimport 'dart:io' show Platform;\nimport 'dart:collection';\nimport 'package:ffi/ffi.dart';\n\nfinal String _libName = Platform.isWindows ? 'libmain.dll' : (Platform.isMacOS ? 'libmain.dylib' : 'libmain.so');\nfinal dynlib = ffi.DynamicLibrary.open('./$_libName');\nfinal _ocheFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFree');\nfinal _ocheFreeDeep = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer, ffi.Int32), void Function(ffi.Pointer, int)>('ocheFreeDeep');\nfinal _ocheGetError = dynlib.lookupFunction<ffi.Pointer<Utf8> Function(), ffi.Pointer<Utf8> Function()>('ocheGetError');\nvoid _checkError() { final ptr = _ocheGetError(); if (ptr.address != 0) { final msg = ptr.toDartString(); _ocheFree(ptr); throw Exception('NimError: $msg'); } }\n"
   
   var inner = ""
   for o in ooBanks: inner &= genDInterface(o)
@@ -363,30 +364,55 @@ macro generate*(output: static string): untyped =
   for s in structBanks.values: code &= genDStruct(s)
   for t in typeDefBanks: code &= t & "\n"
 
-  code &= "class NativeListView<T> with IterableMixin<T> {\n" &
+  code &= "final _finalizer = Finalizer<ffi.Pointer<ffi.Void>>((ptr) => _ocheFree(ptr));\n" &
+          "final _finalizerDeep = Finalizer<(ffi.Pointer<ffi.Void>, int)>((msg) => _ocheFreeDeep(msg.$1, msg.$2));\n\n" &
+          "abstract class OcheView<T> with IterableMixin<T> {\n" &
+          "  ffi.Pointer<ffi.Void> get _nativePtr;\n" &
+          "  int get length;\n" &
+          "  @override Iterator<T> get iterator => _NativeListIterator<T>(this);\n" &
+          "  T operator [](int index);\n" &
+          "}\n\n" &
+          "class NativeListView<T> extends OcheView<T> {\n" &
           "  ffi.Pointer<ffi.Void> _ptr;\n" &
-          "  final String _typeName;\n" &
+          "  final int _typeId;\n" &
           "  final T Function(ffi.Pointer<ffi.Void> ptr) _unpacker;\n" &
           "  final int _elemSize;\n" &
-          "  late final int length;\n" &
-          "  NativeListView(this._ptr, this._typeName, this._unpacker, this._elemSize) {\n" &
+          "  @override late final int length;\n" &
+          "  NativeListView(this._ptr, this._typeId, this._unpacker, this._elemSize) {\n" &
           "    if (_ptr.address == 0) { length = 0; return; }\n" &
           "    length = ffi.Pointer<ffi.Int64>.fromAddress(_ptr.address).value;\n" &
+          "    _finalizerDeep.attach(this, (_ptr, _typeId), detach: this);\n" &
           "  }\n" &
-          "  @override Iterator<T> get iterator => _NativeListIterator(this);\n" &
-          "  T operator [](int index) {\n" &
+          "  @override ffi.Pointer<ffi.Void> get _nativePtr => _ptr;\n" &
+          "  @override T operator [](int index) {\n" &
           "    if (_ptr.address == 0) throw StateError('NativeListView has been disposed');\n" &
           "    if (index < 0 || index >= length) throw RangeError.index(index, this);\n" &
           "    return _unpacker(ffi.Pointer<ffi.Void>.fromAddress(_ptr.address + 8 + (index * _elemSize)));\n" &
           "  }\n" &
           "  void dispose() {\n" &
           "    if (_ptr.address == 0) return;\n" &
-          "    using((Arena a) => _ocheFreeDeep(_ptr, _typeName.toNativeUtf8(allocator: a)));\n" &
+          "    _finalizerDeep.detach(this);\n" &
+          "    _ocheFreeDeep(_ptr, _typeId);\n" &
           "    _ptr = ffi.Pointer.fromAddress(0);\n" &
           "  }\n" &
-          "}\n" &
+          "}\n\n" &
+          "class SharedListView<T> extends OcheView<T> {\n" &
+          "  final ffi.Pointer<ffi.Void> _ptr;\n" &
+          "  final T Function(ffi.Pointer<ffi.Void> ptr) _unpacker;\n" &
+          "  final int _elemSize;\n" &
+          "  @override late final int length;\n" &
+          "  SharedListView(this._ptr, this._unpacker, this._elemSize) {\n" &
+          "    if (_ptr.address == 0) { length = 0; return; }\n" &
+          "    length = ffi.Pointer<ffi.Int64>.fromAddress(_ptr.address).value;\n" &
+          "  }\n" &
+          "  @override ffi.Pointer<ffi.Void> get _nativePtr => _ptr;\n" &
+          "  @override T operator [](int index) {\n" &
+          "    if (index < 0 || index >= length) throw RangeError.index(index, this);\n" &
+          "    return _unpacker(ffi.Pointer<ffi.Void>.fromAddress(_ptr.address + 8 + (index * _elemSize)));\n" &
+          "  }\n" &
+          "}\n\n" &
           "class _NativeListIterator<T> implements Iterator<T> {\n" &
-          "  final NativeListView<T> _view; int _index = -1;\n" &
+          "  final OcheView<T> _view; int _index = -1;\n" &
           "  _NativeListIterator(this._view);\n" &
           "  @override T get current => _view[_index];\n" &
           "  @override bool moveNext() => ++_index < _view.length;\n" &
@@ -395,10 +421,20 @@ macro generate*(output: static string): untyped =
   code &= "class Oche {\n" & inner & "\n}\nfinal oche = Oche();\n"
   writeFile(output, code)
   
-  var free = "proc ocheFree(p: pointer) {.exportc, dynlib.} = (if not p.isNil: dealloc(p))\nproc ocheFreeDeep(p: pointer, typeName: cstring) {.exportc, dynlib.} = \n  if p.isNil: return\n  let name = $typeName\n"
+  var free = "proc ocheFree(p: pointer) {.exportc, dynlib.} = (if not p.isNil: dealloc(p))\n"
+  free &= "proc ocheFreeDeep(p: pointer, typeId: int32) {.exportc, dynlib.} = \n"
+  free &= "  if p.isNil: return\n"
+  free &= "  let L = cast[ptr int64](p)[]\n"
+  
   for s in structBanks.values:
-    free &= "  if name == \"" & s.name & "\":\n    let o = cast[ptr " & s.name & "](p)\n"
-    for f in s.fields: (if f.typ.name in ["string", "cstring"]: free &= "    if not o." & f.name & ".isNil: dealloc(o." & f.name & ")\n")
+    free &= "  if typeId == " & $s.typeId & ":\n"
+    free &= "    let dataPtr = cast[uint](p) + uint(sizeof(int64))\n"
+    free &= "    for i in 0 ..< L:\n"
+    free &= "      let o = cast[ptr " & s.name & "](dataPtr + uint(i * sizeof(" & s.name & ")))\n"
+    for f in s.fields:
+       if f.typ.name in ["string", "cstring"]:
+         free &= "      if not o." & f.name & ".isNil: dealloc(o." & f.name & ")\n"
     free &= "    dealloc(p); return\n"
+    
   free &= "  dealloc(p)\n"
   parseStmt(free)
