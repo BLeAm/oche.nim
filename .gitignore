@@ -6,3 +6,6 @@ res.txt
 main.exe
 main
 libmain.so
+nimble.develop
+nimble.paths
+nimbledeps

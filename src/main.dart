@@ -1,42 +1,35 @@
 import 'nlib.dart';
 
-void main() async {
+void main() {
+  const n = 100000;
   print("==========================================");
-  print("   🦅 OCHE PURE DART EXPERIENCE 🦅   ");
+  print("     🦅 OCHE ZERO-COPY CHALLENGE 🦅     ");
   print("==========================================\n");
 
-  // 1. เรียกฟังก์ชันปกติ (ใช้ UserRole.Admin ตามที่แก้ใน Nim)
-  print("1. [Friendly Objects]");
-  final user = User(
-    id: 101,
-    name: "Dart Hero",
-    status: UserRole.Admin,
-    position: Point(x: 100.0, y: 200.0),
-  );
-  print(
-    "   Created Dart Object: ${user.name} at (${user.position.x}, ${user.position.y})",
-  );
+  // 1. ทดสอบโหมดปกติ (Copy)
+  print("1. [Standard Copy Mode]");
+  final sw1 = Stopwatch()..start();
+  final list = oche.getPointsCopy(n);
+  sw1.stop();
+  print("   - Time to fetch $n points: ${sw1.elapsedMilliseconds}ms");
+  print("   - Accessing point[500]: (${list[500].x}, ${list[500].y})");
 
-  // 2. ส่ง List ของออบเจกต์ปกติ
-  print("\n2. [Automatic Mapping]");
-  final points = [Point(x: 1, y: 1), Point(x: 2, y: 2), Point(x: 3, y: 3)];
-  final totalSum = sumPoints(points);
-  print("   Sum of 3 points: $totalSum");
+  // 2. ทดสอบโหมด View (Zero-Copy)
+  print("\n2. [Zero-Copy View Mode]");
+  final sw2 = Stopwatch()..start();
+  final view = oche.getPointsView(n);
+  sw2.stop();
+  print("   - Time to fetch $n points: ${sw2.elapsedMilliseconds}ms");
 
-  // 3. รับออบเจกต์กลับจาก Nim (ข้อมูลถูก copy มาแล้ว ปลอดภัย 100%)
-  print("\n3. [Safe Returns]");
-  final result42 = findUserById(42);
-  if (result42 != null) {
-    print("   Found User 42: ${result42.name}, Status: ${result42.status}");
-    print("   Position: (${result42.position.x}, ${result42.position.y})");
-  }
+  final p500 = view[500];
+  print("   - Accessing point[500] (Live View): (${p500.x}, ${p500.y})");
 
-  // 4. Async
-  print("\n4. [Async Isolation]");
-  final asyncRes = await heavyTaskAsync(1);
-  print("   Async Result: $asyncRes");
+  final ratio = sw1.elapsedMilliseconds / sw2.elapsedMilliseconds;
+  print("\n>>> Zero-Copy is ${ratio.toStringAsFixed(1)}x faster to return!");
+
+  view.dispose();
 
   print("\n==========================================");
-  print("     ✅ NO FFI IMPORTS IN USER CODE!      ");
+  print("   🚀 SPEED MEETS CONVENIENCE! 🚀      ");
   print("==========================================");
 }
