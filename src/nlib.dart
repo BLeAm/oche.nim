@@ -40,7 +40,7 @@ class Point {
     required this.y
   });
 
-  void _pack(NPoint target, ffi.Allocator a) {
+  void _pack(NPoint target, ffi.Allocator alloc) {
     target.x = x;
     target.y = y;
   }
@@ -80,8 +80,8 @@ class Tag {
     required this.id
   });
 
-  void _pack(NTag target, ffi.Allocator a) {
-    target.name = name.toNativeUtf8(allocator: a);
+  void _pack(NTag target, ffi.Allocator alloc) {
+    target.name = name.toNativeUtf8(allocator: alloc);
     target.id = id;
   }
 
@@ -125,10 +125,10 @@ class User {
     required this.primaryTag
   });
 
-  void _pack(NUser target, ffi.Allocator a) {
-    target.username = username.toNativeUtf8(allocator: a);
+  void _pack(NUser target, ffi.Allocator alloc) {
+    target.username = username.toNativeUtf8(allocator: alloc);
     target.status = status.index;
-    this.primaryTag._pack(target.primaryTag, a);
+    this.primaryTag._pack(target.primaryTag, alloc);
   }
 
   void _packManual(NUser target) {
@@ -245,27 +245,27 @@ class Oche {
   late final ngreetCall = dynlib.lookupFunction<NgreetN, NgreetD>('greet');
 
   String greet(final String v_name) {
-    return using((a) {
+    return using((alloc) {
 
-      final p = ngreetCall(v_name.toNativeUtf8(allocator: a)); _checkError();
+      final p = ngreetCall(v_name.toNativeUtf8(allocator: alloc)); _checkError();
       if (p.address == 0) return ''; try { return p.cast<Utf8>().toDartString(); } finally { _ocheFree(p); }
     });
   }
   late final ncreateUserCall = dynlib.lookupFunction<NcreateUserN, NcreateUserD>('createUser');
 
   User createUser(final String v_name, final int v_tagId) {
-    return using((a) {
+    return using((alloc) {
 
-      final r = ncreateUserCall(v_name.toNativeUtf8(allocator: a), v_tagId); _checkError();
+      final r = ncreateUserCall(v_name.toNativeUtf8(allocator: alloc), v_tagId); _checkError();
       return User._unpack(r);
     });
   }
   late final nsumPointsCall = dynlib.lookupFunction<NsumPointsN, NsumPointsD>('sumPoints');
 
   double sumPoints(final List<Point> v_points) {
-    return using((a) {
-    final _v_pointsPtr = a.allocate<NPoint>(v_points.length * ffi.sizeOf<NPoint>());
-    for (var i = 0; i < v_points.length; i++) { v_points[i]._pack(_v_pointsPtr[i], a); }
+    return using((alloc) {
+    final _v_pointsPtr = alloc.allocate<NPoint>(v_points.length * ffi.sizeOf<NPoint>());
+    for (var i = 0; i < v_points.length; i++) { v_points[i]._pack(_v_pointsPtr[i], alloc); }
       final r = nsumPointsCall(_v_pointsPtr, v_points.length); _checkError();
       return r;
     });

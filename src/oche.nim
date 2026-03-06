@@ -237,7 +237,7 @@ proc genDInterface(obj: OcheObject): string =
       dartFfiParams.add (if nT.contains("Int") or nT.contains("Double") or nT.contains("Bool"): toDartType(p.typ.name) else: nT)
       if p.typ.name in ["string", "cstring"]:
          needsArena = true
-         callArgs.add pN & ".toNativeUtf8(allocator: a)"
+         callArgs.add pN & ".toNativeUtf8(allocator: alloc)"
       elif enumBanks.hasKey(p.typ.name): callArgs.add pN & ".index"
       else: callArgs.add pN
 
