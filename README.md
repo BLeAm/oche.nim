@@ -159,6 +159,21 @@ proc processImageGrayscale() {.oche.} =
 ```
 *(Tip: Combine this with Oche's support for `uint8` and `float32` primitives to densely pack your memory structs for game engines!)*
 
+### 🔄 7. Asynchronous Execution (Isolates)
+
+Oche generates **synchronous** FFI bindings by default to maximize sub-millisecond execution speeds with zero overhead. 
+
+If your task is exceptionally heavy (like traversing 10,000,000 nodes or decoding 4K video) and threatens to drop frames on the Flutter UI thread, you should run the Oche call in the background using Dart 3's modern `Isolate.run()`:
+
+```dart
+// 1. Synchronous (Fastest, blocks Main Thread momentarily)
+final energy = oche.nbodyNim(100000); 
+
+// 2. Asynchronous (Background execution, UI remains perfectly smooth)
+final asyncEnergy = await Isolate.run(() => oche.nbodyNim(100000));
+```
+*Because Oche manages data in Native C-RAM, passing these pointers across Dart Isolates causes practically zero serialization overhead!*
+
 ---
 
 ## 📝 Safety Overview & Best Practices
