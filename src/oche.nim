@@ -20,6 +20,7 @@ type
     name:   string
     typeId: int
     fields: seq[OcheField]
+    isPOD:  bool
   OcheEnum = object
     name:   string
     values: seq[string]
@@ -39,17 +40,20 @@ var typeDefBanks {.compileTime.}: seq[string] = @[]
 
 var lastOcheError {.threadvar.}: string
 
-# ─── Shared Memory Support (OcheBuffer) ──────────────────────────────────────
+proc toOcheStr*(s: string): cstring =
+  if s.len == 0: return nil
+  result = cast[cstring](alloc0(s.len + 1))
+  copyMem(result, s.cstring, s.len + 1)
 
 type
   OcheBuffer*[T] = object
-    p*: pointer # Points to [int64 len][int32 typeId][int32 flags][T data...]
+    p*: pointer
 
 proc len*[T](b: OcheBuffer[T]): int =
   if b.p.isNil: return 0
   cast[ptr int64](b.p)[]
 
-template dataPtr[T](b: OcheBuffer[T]): ptr UncheckedArray[T] =
+template dataPtr*[T](b: OcheBuffer[T]): ptr UncheckedArray[T] =
   cast[ptr UncheckedArray[T]](cast[uint](b.p) + 16)
 
 proc `[]`*[T](b: OcheBuffer[T], idx: int): var T =
@@ -73,8 +77,6 @@ macro ocheId*(T: typedesc): int =
 
 template newOche*[T](n: int): OcheBuffer[T] =
   newOcheBuffer[T](n, typeId = ocheId(T))
-
-# ────────────────────────────────────────────────────────────────────────────
 
 proc ocheGetError(): cstring {.exportc, dynlib.} =
   if lastOcheError == "": return nil
@@ -117,6 +119,8 @@ proc toNativeType(t: string): string =
   case t
   of "int", "int64": return "ffi.Int64"
   of "float", "float64": return "ffi.Double"
+  of "float32": return "ffi.Float"
+  of "uint8": return "ffi.Uint8"
   of "bool": return "ffi.Bool"
   of "cstring", "string": return "ffi.Pointer<Utf8>"
   else:
@@ -132,8 +136,8 @@ proc toDartType(t: string): string =
     let innerV = if structBanks.hasKey(innerName): innerName & "View" else: toDartType(innerName)
     return "SharedListView<" & innerV & ">"
   case t
-  of "int", "int64": return "int"
-  of "float", "float64": return "double"
+  of "int", "int64", "uint8": return "int"
+  of "float", "float64", "float32": return "double"
   of "bool": return "bool"
   of "cstring", "string": return "String"
   else: return t
@@ -144,46 +148,57 @@ proc genDEnum(e: OcheEnum): string =
   result = "\nenum " & e.name & " {\n" & lines.join("\n") & "\n}\n"
 
 proc genDStruct(s: OcheStruct): string =
-  var ffiFields, toFfi, fromFfi, dartFields: seq[string]
+  var ffiFields, toFfi, fromFfi, dartFields, toFfiManual: seq[string]
   for f in s.fields:
     let nT = toNativeType(f.typ.name)
     let dT = toDartType(f.typ.name)
     if structBanks.hasKey(f.typ.name):
       ffiFields.add "  external N" & f.typ.name & " " & f.name & ";"
-      toFfi.add "    this." & f.name & "._pack(target." & f.name & ", a);"
+      toFfi.add "    this." & f.name & "._pack(target." & f.name & ", alloc);"
+      toFfiManual.add "    this." & f.name & "._pack(target." & f.name & ", malloc);"
       fromFfi.add "    " & f.name & ": " & f.typ.name & "._unpack(source." & f.name & "),"
     elif f.typ.name in ["string", "cstring"]:
       ffiFields.add "  external ffi.Pointer<Utf8> " & f.name & ";"
-      toFfi.add "    target." & f.name & " = " & f.name & ".toNativeUtf8(allocator: a);"
+      toFfi.add "    target." & f.name & " = " & f.name & ".toNativeUtf8(allocator: alloc);"
+      toFfiManual.add "    target." & f.name & " = " & f.name & ".toNativeUtf8(allocator: malloc);"
       fromFfi.add "    " & f.name & ": (source." & f.name & ".address == 0) ? '' : source." & f.name & ".toDartString(),"
     elif enumBanks.hasKey(f.typ.name):
       ffiFields.add "  @ffi.Int32() external int " & f.name & ";"
       toFfi.add "    target." & f.name & " = " & f.name & ".index;"
+      toFfiManual.add "    target." & f.name & " = " & f.name & ".index;"
       fromFfi.add "    " & f.name & ": " & f.typ.name & ".values[source." & f.name & "],"
     else:
       ffiFields.add "  @" & nT & "() external " & dT & " " & f.name & ";"
       toFfi.add "    target." & f.name & " = " & f.name & ";"
+      toFfiManual.add "    target." & f.name & " = " & f.name & ";"
       fromFfi.add "    " & f.name & ": source." & f.name & ","
     dartFields.add "  final " & dT & " " & f.name & ";"
 
   let ffiStruct = "final class N" & s.name & " extends ffi.Struct {\n" & ffiFields.join("\n") & "\n}\n"
-  var extType = "\nextension type " & s.name & "View(ffi.Pointer<N" & s.name & "> _ptr) {\n"
+  var extType = "\nextension type " & s.name & "View(N" & s.name & " _ref) {\n"
+  var packIntoLines: seq[string] = @[]
   for f in s.fields:
     let dT = toDartType(f.typ.name)
     if f.typ.name in ["string", "cstring"]:
-      extType &= "  " & dT & " get " & f.name & " => (_ptr.ref." & f.name & ".address == 0) ? '' : _ptr.ref." & f.name & ".toDartString();\n"
+      extType &= "  " & dT & " get " & f.name & " => (_ref." & f.name & ".address == 0) ? '' : _ref." & f.name & ".toDartString();\n"
+      packIntoLines.add "    p.ref." & f.name & " = _ref." & f.name & ";"
     elif enumBanks.hasKey(f.typ.name):
-      extType &= "  " & dT & " get " & f.name & " => " & f.typ.name & ".values[_ptr.ref." & f.name & "];\n"
-      extType &= "  set " & f.name & "(" & dT & " v) => _ptr.ref." & f.name & " = v.index;\n"
+      extType &= "  " & dT & " get " & f.name & " => " & f.typ.name & ".values[_ref." & f.name & "];\n"
+      extType &= "  set " & f.name & "(" & dT & " v) => _ref." & f.name & " = v.index;\n"
+      packIntoLines.add "    p.ref." & f.name & " = _ref." & f.name & ";"
     elif structBanks.hasKey(f.typ.name):
-      extType &= "  " & f.typ.name & "View get " & f.name & " => " & f.typ.name & "View(_ptr.ref." & f.name & ".address as ffi.Pointer<N" & f.typ.name & ">);\n"
+      extType &= "  " & f.typ.name & "View get " & f.name & " => " & f.typ.name & "View(_ref." & f.name & ");\n"
+      packIntoLines.add "    p.ref." & f.name & " = _ref." & f.name & ";"
     else:
-      extType &= "  " & dT & " get " & f.name & " => _ptr.ref." & f.name & ";\n"
-      extType &= "  set " & f.name & "(" & dT & " v) => _ptr.ref." & f.name & " = v;\n"
-  extType &= "}\n"
+      extType &= "  " & dT & " get " & f.name & " => _ref." & f.name & ";\n"
+      extType &= "  set " & f.name & "(" & dT & " v) => _ref." & f.name & " = v;\n"
+      packIntoLines.add "    p.ref." & f.name & " = _ref." & f.name & ";"
+  extType &= "  void _packInto(ffi.Pointer<N" & s.name & "> p) {\n" & packIntoLines.join("\n") & "\n  }\n}\n"
+
   let dartClass = "class " & s.name & " {\n" & dartFields.join("\n") & "\n" &
                   "  const " & s.name & "({\n" & s.fields.mapIT("    required this." & it.name).join(",\n") & "\n  });\n\n" &
-                  "  void _pack(N" & s.name & " target, ffi.Allocator a) {\n" & toFfi.join("\n") & "\n  }\n\n" &
+                  "  void _pack(N" & s.name & " target, ffi.Allocator alloc) {\n" & toFfi.join("\n") & "\n  }\n\n" &
+                  "  void _packManual(N" & s.name & " target) {\n" & toFfiManual.join("\n") & "\n  }\n\n" &
                   "  static " & s.name & " _unpack(N" & s.name & " source) {\n" &
                   "    return " & s.name & "(\n" & fromFfi.join("\n") & "\n    );\n  }\n" &
                   "}\n"
@@ -204,8 +219,8 @@ proc genDInterface(obj: OcheObject): string =
       let sz = if isC: "ffi.sizeOf<N" & iI & ">()" else: "ffi.sizeOf<" & nT & ">()"
       nativeParams.add "ffi.Pointer<" & nT & ">, ffi.Int64"
       dartFfiParams.add "ffi.Pointer<" & nT & ">, int"
-      prepWork.add "    final _" & pN & "Ptr = a.allocate<" & nT & ">(" & pN & ".length * " & sz & ");"
-      if isC: prepWork.add "    for (var i = 0; i < " & pN & ".length; i++) { " & pN & "[i]._pack(_" & pN & "Ptr[i], a); }"
+      prepWork.add "    final _" & pN & "Ptr = alloc.allocate<" & nT & ">(" & pN & ".length * " & sz & ");"
+      if isC: prepWork.add "    for (var i = 0; i < " & pN & ".length; i++) { " & pN & "[i]._pack(_" & pN & "Ptr[i], alloc); }"
       elif enumBanks.hasKey(iI): prepWork.add "    for (var i = 0; i < " & pN & ".length; i++) { _" & pN & "Ptr[i] = " & pN & "[i].index; }"
       else: prepWork.add "    for (var i = 0; i < " & pN & ".length; i++) { _" & pN & "Ptr[i] = " & pN & "[i]; }"
       callArgs.add "_" & pN & "Ptr, " & pN & ".length"
@@ -213,8 +228,8 @@ proc genDInterface(obj: OcheObject): string =
       needsArena = true
       nativeParams.add "ffi.Pointer<N" & p.typ.name & ">"
       dartFfiParams.add "ffi.Pointer<N" & p.typ.name & ">"
-      prepWork.add "    final _" & pN & "Ptr = a.allocate<N" & p.typ.name & ">(ffi.sizeOf<N" & p.typ.name & ">());"
-      prepWork.add "    " & pN & "._pack(_" & pN & "Ptr.ref, a);"
+      prepWork.add "    final _" & pN & "Ptr = alloc.allocate<N" & p.typ.name & ">(ffi.sizeOf<N" & p.typ.name & ">());"
+      prepWork.add "    " & pN & "._pack(_" & pN & "Ptr.ref, alloc);"
       callArgs.add "_" & pN & "Ptr"
     else:
       let nT = toNativeType(p.typ.name)
@@ -247,14 +262,22 @@ proc genDInterface(obj: OcheObject): string =
   if obj.retType.isShared:
     let iI = obj.retType.inner; let isC = structBanks.hasKey(iI); let nT = if isC: "N" & iI else: toNativeType(iI)
     let sz = if isC: "ffi.sizeOf<N" & iI & ">()" else: "ffi.sizeOf<" & nT & ">()"
+    let packerBody =
+      if isC:
+        let innerStruct = structBanks[iI]
+        let freeCall = if not innerStruct.isPOD: "_ocheFreeInner(p, " & $innerStruct.typeId & "); " else: ""
+        "if (v is " & iI & ") { " & freeCall & "v._packManual(p.cast<N" & iI & ">().ref); } " &
+        "else if (v is " & iI & "View) { v._packInto(p.cast<N" & iI & ">()); }"
+      else:
+        "p.cast<" & nT & ">().value = v as " & toDartType(iI) & ";"
     body = "      final p = " & callName & "(" & callArgs.join(", ") & "); _checkError();\n" &
-           "      return SharedListView<" & (if isC: iI & "View" else: toDartType(iI)) & ">(p, (ptr) => " & (if isC: iI & "View(ptr.cast<N" & iI & ">())" else: "ptr.cast<" & nT & ">().value") & ", " & (if isC: "(p, v, a) { if (v is " & iI & ") v._pack(p.cast<N" & iI & ">().ref, a); else if (v is " & iI & "View) { for(int j=0; j<" & sz & "; j++) p.cast<ffi.Uint8>()[j] = v._ptr.cast<ffi.Uint8>()[j]; } }" else: "null") & ", " & sz & ");"
+           "      return SharedListView<" & (if isC: iI & "View" else: toDartType(iI)) & ">(p, (ptr) => " & (if isC: iI & "View(ptr.cast<N" & iI & ">().ref)" else: "ptr.cast<" & nT & ">().value") & ", (p, v) { " & packerBody & " }, " & sz & ");"
   elif obj.retType.isSeq:
     let iI = obj.retType.inner; let isC = structBanks.hasKey(iI); let nT = if isC: "N" & iI else: toNativeType(iI)
     if obj.isView:
       let sz = if isC: "ffi.sizeOf<N" & iI & ">()" else: "ffi.sizeOf<" & nT & ">()"
       body = "      final p = " & callName & "(" & callArgs.join(", ") & "); _checkError();\n" &
-             "      return NativeListView<" & (if isC: iI & "View" else: toDartType(iI)) & ">(p, (ptr) => " & (if isC: iI & "View(ptr.cast<N" & iI & ">())" else: "ptr.cast<" & nT & ">().value") & ", " & sz & ");"
+             "      return NativeListView<" & (if isC: iI & "View" else: toDartType(iI)) & ">(p, (ptr) => " & (if isC: iI & "View(ptr.cast<N" & iI & ">().ref)" else: "ptr.cast<" & nT & ">().value") & ", " & sz & ");"
     else:
       body = "      final p = " & callName & "(" & callArgs.join(", ") & "); _checkError();\n" &
              "      if (p.address == 0) return []; try {\n" &
@@ -265,7 +288,7 @@ proc genDInterface(obj: OcheObject): string =
     let iI = obj.retType.inner; let isC = structBanks.hasKey(iI); let nTI = if isC: "N" & iI else: toNativeType(iI)
     if obj.isView:
       body = "      final p = " & callName & "(" & callArgs.join(", ") & "); _checkError();\n" &
-             "      return " & (if isC: iI & "View(p.cast<N" & iI & ">());" else: "p.cast<" & nTI & ">().value;")
+             "      return " & (if isC: iI & "View(p.cast<N" & iI & ">().ref);" else: "p.cast<" & nTI & ">().value;")
     else:
       body = "      final p = " & callName & "(" & callArgs.join(", ") & "); _checkError();\n" &
              "      if (p.address == 0) return null; try {\n" &
@@ -278,12 +301,14 @@ proc genDInterface(obj: OcheObject): string =
     body = "      " & callName & "(" & callArgs.join(", ") & "); _checkError();"
   else:
     body = "      final r = " & callName & "(" & callArgs.join(", ") & "); _checkError();\n" &
-           "      return " & (if enumBanks.hasKey(obj.retType.name): dT_ret & ".values[r];" else: "r;")
+           "      return " & (if enumBanks.hasKey(obj.retType.name): dT_ret & ".values[r];" elif structBanks.hasKey(obj.retType.name): obj.retType.name & "._unpack(r);" else: "r;")
 
   typeDefBanks.add "typedef N" & obj.name & "N = " & nR & " Function(" & nativeParams.join(", ") & ");"
   typeDefBanks.add "typedef N" & obj.name & "D = " & dR & " Function(" & dartFfiParams.join(", ") & ");"
 
-  let finalBody = if needsArena: "    return using((a) {\n" & prepWork.join("\n") & "\n" & body & "\n    });" else: body
+  let finalBody = if needsArena:
+      "    return using((alloc) {\n" & prepWork.join("\n") & "\n" & body & "\n    });"
+    else: body
   
   result = "  late final " & callName & " = dynlib.lookupFunction<N" & obj.name & "N, N" & obj.name & "D>('" & obj.name & "');\n\n" &
            "  " & actualRetType & " " & obj.name & "(" & wrapperParams.join(", ") & ") {\n" & finalBody & "\n  }\n"
@@ -298,9 +323,26 @@ proc processOche(body: NimNode, isView: bool): NimNode {.compileTime.} =
       let prag = newTree(nnkPragma, newColonExpr(ident("size"), newLit(4)))
       return newTree(nnkTypeDef, newTree(nnkPragmaExpr, nameNode, prag), newEmptyNode(), tyNode)
     else:
-      var f: seq[OcheField] = @[]; let rec = tyNode[2]
-      for field in rec: (if field.kind == nnkIdentDefs: (let t = parseType(field[^2]); (for i in 0..<field.len-2: (var fn = field[i]; (if fn.kind == nnkPostfix: fn = fn[1]); f.add OcheField(name: fn.strVal, typ: t)))))
-      structBanks[name] = OcheStruct(name: name, typeId: structBanks.len + 1, fields: f); return body
+      var f: seq[OcheField] = @[]; let rec = tyNode[2]; var pod = true
+      let newRec = newTree(nnkRecList)
+      for field in rec:
+         if field.kind == nnkIdentDefs:
+           # Transformation: string -> cstring for FFI compatibility
+           var ft = field[^2]
+           if ft.kind == nnkIdent and ft.strVal == "string": ft = ident("cstring")
+           let t = parseType(ft)
+           for i in 0..<field.len-2:
+             var fn = field[i]; (if fn.kind == nnkPostfix: fn = fn[1]); f.add OcheField(name: fn.strVal, typ: t)
+           if t.name in ["string", "cstring"]:
+             pod = false
+           elif structBanks.hasKey(t.name):
+             if not structBanks[t.name].isPOD: pod = false
+           var newNode = newTree(nnkIdentDefs)
+           for i in 0..<field.len-2: newNode.add field[i]
+           newNode.add ft; newNode.add newEmptyNode()
+           newRec.add newNode
+      structBanks[name] = OcheStruct(name: name, typeId: structBanks.len + 1, fields: f, isPOD: pod)
+      return newTree(nnkTypeDef, nameNode, newEmptyNode(), newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), newRec))
 
   let obj = parseOche(body, isView); ooBanks.add(obj)
   let procName = body[0]; let originalBody = body[6]; var originalRetType = body[3][0]
@@ -323,12 +365,14 @@ proc processOche(body: NimNode, isView: bool): NimNode {.compileTime.} =
   let resNode = ident"res"
   var conv: NimNode
   if obj.retType.isSeq:
-    let iT = ident(obj.retType.inner); let tid = if structBanks.hasKey(obj.retType.inner): structBanks[obj.retType.inner].typeId else: 0
+    let iT = ident(obj.retType.inner); let s = if structBanks.hasKey(obj.retType.inner): structBanks[obj.retType.inner] else: OcheStruct(isPOD: true)
+    let tid = s.typeId; var flags = 0; (if s.isPOD: flags = flags or 2)
     conv = quote do:
       let L = int64(`resNode`.len)
       let p = cast[ptr byte](alloc0(16 + (L * sizeof(`iT`))))
       cast[ptr int64](p)[] = L
       cast[ptr int32](cast[uint](p) + 8)[] = int32(`tid`)
+      cast[ptr int32](cast[uint](p) + 12)[] = int32(`flags`)
       if L > 0: copyMem(cast[pointer](cast[uint](p) + 16), unsafeAddr `resNode`[0], int(L) * sizeof(`iT`))
       p
   elif obj.retType.isShared:
@@ -370,7 +414,7 @@ macro oche*(arg: untyped, body: untyped): untyped =
   processOche(body, isView)
 
 macro generate*(output: static string): untyped =
-  var code = "import 'dart:ffi' as ffi;\nimport 'dart:isolate';\nimport 'dart:io' show Platform;\nimport 'dart:collection';\nimport 'package:ffi/ffi.dart';\n\nfinal String _libName = Platform.isWindows ? 'libmain.dll' : (Platform.isMacOS ? 'libmain.dylib' : 'libmain.so');\nfinal dynlib = ffi.DynamicLibrary.open('./$_libName');\nfinal _ocheFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFree');\nfinal _ocheFreeDeep = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFreeDeep');\nfinal _ocheGetError = dynlib.lookupFunction<ffi.Pointer<Utf8> Function(), ffi.Pointer<Utf8> Function()>('ocheGetError');\nvoid _checkError() { final ptr = _ocheGetError(); if (ptr.address != 0) { final msg = ptr.toDartString(); _ocheFree(ptr); throw Exception('NimError: $msg'); } }\n"
+  var code = "import 'dart:ffi' as ffi;\nimport 'dart:io' show Platform;\nimport 'dart:collection';\nimport 'package:ffi/ffi.dart';\n\nfinal String _libName = Platform.isWindows ? 'libmain.dll' : (Platform.isMacOS ? 'libmain.dylib' : 'libmain.so');\nfinal dynlib = ffi.DynamicLibrary.open('./$_libName');\nfinal _ocheFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFree');\nfinal _ocheFreeDeep = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFreeDeep');\nfinal _ocheFreeInner = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer, ffi.Int32), void Function(ffi.Pointer, int)>('ocheFreeInner');\nfinal _ocheGetError = dynlib.lookupFunction<ffi.Pointer<Utf8> Function(), ffi.Pointer<Utf8> Function()>('ocheGetError');\nvoid _checkError() { final ptr = _ocheGetError(); if (ptr.address != 0) { final msg = ptr.toDartString(); _ocheFree(ptr); throw Exception('NimError: $msg'); } }\n"
   
   var inner = ""
   for o in ooBanks: inner &= genDInterface(o)
@@ -413,7 +457,7 @@ macro generate*(output: static string): untyped =
           "class SharedListView<T> extends OcheView<T> {\n" &
           "  final ffi.Pointer<ffi.Void> _ptr;\n" &
           "  final T Function(ffi.Pointer<ffi.Void> ptr) _unpacker;\n" &
-          "  final void Function(ffi.Pointer<ffi.Void> ptr, dynamic value, ffi.Allocator a)? _packer;\n" &
+          "  final void Function(ffi.Pointer<ffi.Void> ptr, dynamic value)? _packer;\n" &
           "  final int _elemSize;\n" &
           "  @override late final int length;\n" &
           "  SharedListView(this._ptr, this._unpacker, this._packer, this._elemSize) {\n" &
@@ -432,7 +476,7 @@ macro generate*(output: static string): untyped =
           "    final flags = ffi.Pointer<ffi.Int32>.fromAddress(_ptr.address + 12).value;\n" &
           "    if ((flags & 1) != 0) throw StateError('Buffer is frozen (READ-ONLY)');\n" &
           "    final p = ffi.Pointer<ffi.Void>.fromAddress(_ptr.address + 16 + (index * _elemSize));\n" &
-          "    if (_packer != null) { using((a) => _packer!(p, value, a)); }\n" &
+          "    if (_packer != null) { _packer!(p, value); }\n" &
           "    else if (value is int) { ffi.Pointer<ffi.Int64>.fromAddress(p.address).value = value; }\n" &
           "    else if (value is double) { ffi.Pointer<ffi.Double>.fromAddress(p.address).value = value; }\n" &
           "    else if (value is bool) { ffi.Pointer<ffi.Bool>.fromAddress(p.address).value = value; }\n" &
@@ -450,20 +494,36 @@ macro generate*(output: static string): untyped =
   writeFile(output, code)
   
   var free = "proc ocheFree(p: pointer) {.exportc, dynlib.} = (if not p.isNil: dealloc(p))\n"
-  free &= "proc ocheFreeDeep(p: pointer) {.exportc, dynlib.} = \n"
-  free &= "  if p.isNil: return\n"
-  free &= "  let L = cast[ptr int64](p)[]\n"
-  free &= "  let typeId = cast[ptr int32](cast[uint](p) + 8)[]\n"
   
   for s in structBanks.values:
-    free &= "  if typeId == int32(" & $s.typeId & "):\n"
-    free &= "    let dataPtr = cast[uint](p) + 16\n"
-    free &= "    for i in 0 ..< L:\n"
-    free &= "      let o = cast[ptr " & s.name & "](dataPtr + uint(i * sizeof(" & s.name & ")))\n"
+    free &= "proc ocheFreeInner" & s.name & "(o: ptr " & s.name & ") = \n"
     for f in s.fields:
-       if f.typ.name in ["string", "cstring"]:
-         free &= "      if not o." & f.name & ".isNil: dealloc(o." & f.name & ")\n"
-    free &= "    dealloc(p); return\n"
-    
+      if f.typ.name in ["string", "cstring"]:
+        # Transformation: o.name is now guaranteed to be cstring/pointer
+        free &= "  if not o." & f.name & ".isNil: dealloc(cast[pointer](o." & f.name & "))\n"
+      elif structBanks.hasKey(f.typ.name) and not structBanks[f.typ.name].isPOD:
+        free &= "  ocheFreeInner" & f.typ.name & "(addr o." & f.name & ")\n"
+    if s.fields.allIT(it.typ.name notin ["string", "cstring"] and (not structBanks.hasKey(it.typ.name) or structBanks[it.typ.name].isPOD)): free &= "  discard\n"
+
+  free &= "proc ocheFreeInner(p: pointer, typeId: int32) {.exportc, dynlib.} = \n"
+  for s in structBanks.values:
+    free &= "  if typeId == " & $s.typeId & ": ocheFreeInner" & s.name & "(cast[ptr " & s.name & "](p)); return\n"
+  free &= "  discard\n\n"
+
+  free &= "proc ocheFreeDeep(p: pointer) {.exportc, dynlib.} = \n"
+  free &= "  if p.isNil: return\n"
+  free &= "  let flags = cast[ptr int32](cast[uint](p) + 12)[]\n"
+  free &= "  if (flags and int32(2)) != 0: dealloc(p); return\n"
+  free &= "  let L = cast[ptr int64](p)[]\n"
+  free &= "  let typeId = cast[ptr int32](cast[uint](p) + 8)[]\n"
+  for s in structBanks.values:
+    if not s.isPOD:
+      free &= "  if typeId == int32(" & $s.typeId & "):\n"
+      free &= "    let dataPtr = cast[uint](p) + 16\n"
+      free &= "    for i in 0 ..< L:\n"
+      free &= "      let o = cast[ptr " & s.name & "](dataPtr + uint(i * sizeof(" & s.name & ")))\n"
+      free &= "      ocheFreeInner" & s.name & "(o)\n"
+      free &= "    dealloc(p); return\n"
   free &= "  dealloc(p)\n"
+  
   parseStmt(free)

@@ -1,38 +1,104 @@
 import oche
 
+# ==========================================
+# 1. Enums
+# ==========================================
+type 
+  Status {.oche.} = enum
+    Active, Inactive, Pending
+
+# ==========================================
+# 2. POD Structs (Plain Old Data)
+# ==========================================
 type
   Point {.oche.} = object
     x, y: float
 
-var globalBuffer: OcheBuffer[Point]
+# ==========================================
+# 3. Complex Structs (Strings & Nested)
+# ==========================================
+type
+  Tag {.oche.} = object
+    name: string
+    id: int
 
-# 1. Standard Copy
+  User {.oche.} = object
+    username: string
+    status: Status
+    primaryTag: Tag
+
+# ==========================================
+# Global Shared Buffers
+# ==========================================
+var globalPoints: OcheBuffer[Point]
+var globalUsers: OcheBuffer[User]
+
+# ==========================================
+# Basic Primitives & Strings
+# ==========================================
+proc addNumbers(a: int, b: int): int {.oche.} = a + b
+
+proc greet(name: string): string {.oche.} = "Hello, " & name
+
+# ==========================================
+# Returning Structs & Enums
+# ==========================================
+proc createUser(name: string, tagId: int): User {.oche.} =
+  User(
+    username: toOcheStr(name), # Use toOcheStr for FFI safety!
+    status: Active,
+    primaryTag: Tag(name: toOcheStr("Tag_" & $tagId), id: tagId)
+  )
+
+# ==========================================
+# Passing Sequences (Dart -> Nim)
+# ==========================================
+proc sumPoints(points: seq[Point]): float {.oche.} =
+  for p in points: result += p.x + p.y
+
+# ==========================================
+# Returning Sequences (Snapshot / Copy Mode)
+# ==========================================
+# The generated Dart code will manage the lifecycle of this sequence via GC Finalizers.
 proc getPointsCopy(n: int): seq[Point] {.oche.} =
-  result = newSeq[Point](n)
-  for i in 0..<n:
-    result[i] = Point(x: i.float, y: i.float * 2)
+  for i in 0..<n: result.add(Point(x: i.float, y: i.float))
 
-# 2. Snapshot View (Read-Only)
+# ==========================================
+# Returning Sequences (Zero-Copy View Mode)
+# ==========================================
+# Nim retains ownership. Useful for read-only massive datasets.
+var cachedPoints: seq[Point]
 proc getPointsView(n: int): seq[Point] {.oche: view.} =
-  result = newSeq[Point](n)
-  for i in 0..<n:
-    result[i] = Point(x: i.float, y: i.float * 2)
+  cachedPoints = newSeq[Point](n)
+  for i in 0..<n: cachedPoints[i] = Point(x: i.float, y: (i*2).float)
+  return cachedPoints
 
-# 3. Live Shared Buffer (Mutable + Auto ID + High Freq Optimization)
-proc getPointsShared(n: int): OcheBuffer[Point] {.oche.} =
-  globalBuffer = newOche[Point](n) # Using the new smart template!
-  for i in 0..<n:
-    globalBuffer[i] = Point(x: i.float, y: i.float * 2)
-  return globalBuffer
-
-# High frequency call test (Should be Lightning Fast, No Arena!)
-proc updatePointFast(idx: int, x: float) {.oche.} =
-  if idx < globalBuffer.len:
-    globalBuffer[idx].x = x
+# ==========================================
+# Shared Live Buffers (Mutation enabled)
+# ==========================================
+proc initSharedPoints(n: int): OcheBuffer[Point] {.oche.} =
+  globalPoints = newOche[Point](n)
+  for i in 0..<n: globalPoints[i] = Point(x: i.float, y: i.float)
+  return globalPoints
 
 proc printSharedPoint(idx: int) {.oche.} =
-  if idx < globalBuffer.len:
-    let p = globalBuffer[idx]
-    echo "Nim (Live): globalBuffer[", idx, "] is now (", p.x, ", ", p.y, ")"
+  if idx < globalPoints.len:
+    echo "Nim sees Point[", idx, "]: (", globalPoints[idx].x, ", ", globalPoints[idx].y, ")"
 
+proc initSharedUsers(n: int): OcheBuffer[User] {.oche.} =
+  globalUsers = newOche[User](n)
+  for i in 0..<n:
+    globalUsers[i] = User(
+      username: toOcheStr("User_" & $i),
+      status: Pending,
+      primaryTag: Tag(name: toOcheStr("Tag_" & $i), id: i)
+    )
+  return globalUsers
+
+proc printSharedUser(idx: int) {.oche.} =
+  if idx < globalUsers.len:
+    let u = globalUsers[idx]
+    echo "Nim sees User[", idx, "] = '", u.username, "', Status: ", u.status, ", Tag: '", u.primaryTag.name, "'"
+
+# Generate Dart bindings!
 generate("nlib.dart")

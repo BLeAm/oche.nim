@@ -113,4 +113,63 @@ proc fannkuchNim(n: int): int {.oche.} =
         for j in 0..i: p[j] = p[j+1]
         p[i+1] = t
 
+# --- CASE 3: Heavy Image Processing ---
+# (Grayscale Conversion on a 4K image 3840x2160 = ~8.2M pixels)
+
+type
+  Pixel {.oche.} = object
+    r, g, b, a: uint8
+
+var imgBuffer: OcheBuffer[Pixel]
+
+proc initImage(w, h: int): OcheBuffer[Pixel] {.oche.} =
+  let size = w * h
+  imgBuffer = newOche[Pixel](size)
+  for i in 0 ..< size:
+    imgBuffer[i] = Pixel(r: (i mod 256).uint8, g: ((i div 2) mod 256).uint8, b: 64, a: 255)
+  return imgBuffer
+
+proc processImageGrayscale() {.oche.} =
+  let p = imgBuffer.dataPtr
+  let n = imgBuffer.len
+  for i in 0 ..< n:
+    let r = p[i].r.float32
+    let g = p[i].g.float32
+    let b = p[i].b.float32
+    let avg = (r * 0.3f + g * 0.59f + b * 0.11f).uint8
+    p[i].r = avg
+    p[i].g = avg
+    p[i].b = avg
+
+# --- CASE 4: Physics Collision Detection ---
+# O(N^2) complexity checks on 10,000 entities (100M checks)
+
+type
+  Entity {.oche.} = object
+    x, y, radius: float32
+    colliding: bool
+
+var entities: OcheBuffer[Entity]
+
+proc initEntities(n: int): OcheBuffer[Entity] {.oche.} =
+  entities = newOche[Entity](n)
+  let p = entities.dataPtr
+  for i in 0 ..< n:
+    p[i] = Entity(x: (i mod 1000).float32, y: (i div 100).float32, radius: 5.0f, colliding: false)
+  return entities
+
+proc detectCollisions() {.oche.} =
+  let p = entities.dataPtr
+  let n = entities.len
+  for i in 0 ..< n: p[i].colliding = false
+  for i in 0 ..< n:
+    for j in i + 1 ..< n:
+      let dx = p[i].x - p[j].x
+      let dy = p[i].y - p[j].y
+      let distSq = dx*dx + dy*dy
+      let limit = p[i].radius + p[j].radius
+      if distSq < limit * limit:
+        p[i].colliding = true
+        p[j].colliding = true
+
 generate("nlib_bench2.dart")

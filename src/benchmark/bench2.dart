@@ -143,6 +143,48 @@ int fannkuchDart(int n) {
   }
 }
 
+// --- DART SIDE: IMAGE PROCESSING (4K) ---
+
+class PixelDart {
+  int r, g, b, a;
+  PixelDart(this.r, this.g, this.b, this.a);
+}
+
+void processImageDart(List<PixelDart> image) {
+  for (var i = 0; i < image.length; i++) {
+    final px = image[i];
+    final avg = (px.r * 0.3 + px.g * 0.59 + px.b * 0.11).toInt();
+    px.r = avg;
+    px.g = avg;
+    px.b = avg;
+  }
+}
+
+// --- DART SIDE: PHYSICS COLLISIONS ---
+
+class EntityDart {
+  double x, y, radius;
+  bool colliding;
+  EntityDart(this.x, this.y, this.radius, this.colliding);
+}
+
+void detectCollisionsDart(List<EntityDart> ents) {
+  int n = ents.length;
+  for (var i = 0; i < n; i++) ents[i].colliding = false;
+  for (var i = 0; i < n; i++) {
+    for (var j = i + 1; j < n; j++) {
+      final dx = ents[i].x - ents[j].x;
+      final dy = ents[i].y - ents[j].y;
+      final distSq = dx * dx + dy * dy;
+      final limit = ents[i].radius + ents[j].radius;
+      if (distSq < limit * limit) {
+        ents[i].colliding = true;
+        ents[j].colliding = true;
+      }
+    }
+  }
+}
+
 // --- HARNESS ---
 
 void runBench(String name, Function pure, Function oche) {
@@ -154,7 +196,7 @@ void runBench(String name, Function pure, Function oche) {
   final sw2 = Stopwatch()..start();
   oche();
   sw2.stop();
-  print("  - Nim+Oche:   ${sw2.elapsedMilliseconds}ms");
+  print("  - Nim+Oche:  ${sw2.elapsedMilliseconds}ms");
   final ratio = (sw1.elapsedMicroseconds / sw2.elapsedMicroseconds)
       .toStringAsFixed(2);
   print(
@@ -168,15 +210,39 @@ void main() {
   print("==========================================\n");
 
   runBench(
-    "N-Body (10,000,000 iterations)",
+    "N-Body (10M Compute Iter)",
     () => nbodyDart(10000000),
-    () => nbodyNim(10000000),
+    () => oche.nbodyNim(10000000),
   );
 
   runBench(
     "Fannkuch-Redux (N=11)",
     () => fannkuchDart(11),
-    () => fannkuchNim(11),
+    () => oche.fannkuchNim(11),
+  );
+
+  final dartImg = List.generate(
+    3840 * 2160,
+    (i) => PixelDart(i % 256, (i ~/ 2) % 256, 64, 255),
+    growable: false,
+  );
+  oche.initImage(3840, 2160);
+  runBench(
+    "4K Grayscale Filter (8.2M Pixels Mutated)",
+    () => processImageDart(dartImg),
+    () => oche.processImageGrayscale(),
+  );
+
+  final dartEnts = List.generate(
+    10000,
+    (i) => EntityDart((i % 1000).toDouble(), (i ~/ 100).toDouble(), 5.0, false),
+    growable: false,
+  );
+  oche.initEntities(10000);
+  runBench(
+    "Physics Collision O(N²) (10K Objects = 100M Checks)",
+    () => detectCollisionsDart(dartEnts),
+    () => oche.detectCollisions(),
   );
 
   print("\n==========================================");

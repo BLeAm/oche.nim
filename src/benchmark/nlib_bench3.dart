@@ -10,136 +10,64 @@ final _ocheFreeDeep = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void
 final _ocheFreeInner = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer, ffi.Int32), void Function(ffi.Pointer, int)>('ocheFreeInner');
 final _ocheGetError = dynlib.lookupFunction<ffi.Pointer<Utf8> Function(), ffi.Pointer<Utf8> Function()>('ocheGetError');
 void _checkError() { final ptr = _ocheGetError(); if (ptr.address != 0) { final msg = ptr.toDartString(); _ocheFree(ptr); throw Exception('NimError: $msg'); } }
-final class NPixel extends ffi.Struct {
-  @ffi.Uint8() external int r;
-  @ffi.Uint8() external int g;
-  @ffi.Uint8() external int b;
-  @ffi.Uint8() external int a;
+final class NVec3 extends ffi.Struct {
+  @ffi.Double() external double x;
+  @ffi.Double() external double y;
+  @ffi.Double() external double z;
 }
 
-extension type PixelView(NPixel _ref) {
-  int get r => _ref.r;
-  set r(int v) => _ref.r = v;
-  int get g => _ref.g;
-  set g(int v) => _ref.g = v;
-  int get b => _ref.b;
-  set b(int v) => _ref.b = v;
-  int get a => _ref.a;
-  set a(int v) => _ref.a = v;
-  void _packInto(ffi.Pointer<NPixel> p) {
-    p.ref.r = _ref.r;
-    p.ref.g = _ref.g;
-    p.ref.b = _ref.b;
-    p.ref.a = _ref.a;
-  }
-}
-
-class Pixel {
-  final int r;
-  final int g;
-  final int b;
-  final int a;
-  const Pixel({
-    required this.r,
-    required this.g,
-    required this.b,
-    required this.a
-  });
-
-  void _pack(NPixel target, ffi.Allocator alloc) {
-    target.r = r;
-    target.g = g;
-    target.b = b;
-    target.a = a;
-  }
-
-  void _packManual(NPixel target) {
-    target.r = r;
-    target.g = g;
-    target.b = b;
-    target.a = a;
-  }
-
-  static Pixel _unpack(NPixel source) {
-    return Pixel(
-    r: source.r,
-    g: source.g,
-    b: source.b,
-    a: source.a,
-    );
-  }
-}
-final class NEntity extends ffi.Struct {
-  @ffi.Float() external double x;
-  @ffi.Float() external double y;
-  @ffi.Float() external double radius;
-  @ffi.Bool() external bool colliding;
-}
-
-extension type EntityView(NEntity _ref) {
+extension type Vec3View(NVec3 _ref) {
   double get x => _ref.x;
   set x(double v) => _ref.x = v;
   double get y => _ref.y;
   set y(double v) => _ref.y = v;
-  double get radius => _ref.radius;
-  set radius(double v) => _ref.radius = v;
-  bool get colliding => _ref.colliding;
-  set colliding(bool v) => _ref.colliding = v;
-  void _packInto(ffi.Pointer<NEntity> p) {
+  double get z => _ref.z;
+  set z(double v) => _ref.z = v;
+  void _packInto(ffi.Pointer<NVec3> p) {
     p.ref.x = _ref.x;
     p.ref.y = _ref.y;
-    p.ref.radius = _ref.radius;
-    p.ref.colliding = _ref.colliding;
+    p.ref.z = _ref.z;
   }
 }
 
-class Entity {
+class Vec3 {
   final double x;
   final double y;
-  final double radius;
-  final bool colliding;
-  const Entity({
+  final double z;
+  const Vec3({
     required this.x,
     required this.y,
-    required this.radius,
-    required this.colliding
+    required this.z
   });
 
-  void _pack(NEntity target, ffi.Allocator alloc) {
+  void _pack(NVec3 target, ffi.Allocator a) {
     target.x = x;
     target.y = y;
-    target.radius = radius;
-    target.colliding = colliding;
+    target.z = z;
   }
 
-  void _packManual(NEntity target) {
+  void _packManual(NVec3 target) {
     target.x = x;
     target.y = y;
-    target.radius = radius;
-    target.colliding = colliding;
+    target.z = z;
   }
 
-  static Entity _unpack(NEntity source) {
-    return Entity(
+  static Vec3 _unpack(NVec3 source) {
+    return Vec3(
     x: source.x,
     y: source.y,
-    radius: source.radius,
-    colliding: source.colliding,
+    z: source.z,
     );
   }
 }
-typedef NnbodyNimN = ffi.Double Function(ffi.Int64);
-typedef NnbodyNimD = double Function(int);
-typedef NfannkuchNimN = ffi.Int64 Function(ffi.Int64);
-typedef NfannkuchNimD = int Function(int);
-typedef NinitImageN = ffi.Pointer<ffi.Void> Function(ffi.Int64, ffi.Int64);
-typedef NinitImageD = ffi.Pointer<ffi.Void> Function(int, int);
-typedef NprocessImageGrayscaleN = ffi.Void Function();
-typedef NprocessImageGrayscaleD = void Function();
-typedef NinitEntitiesN = ffi.Pointer<ffi.Void> Function(ffi.Int64);
-typedef NinitEntitiesD = ffi.Pointer<ffi.Void> Function(int);
-typedef NdetectCollisionsN = ffi.Void Function();
-typedef NdetectCollisionsD = void Function();
+typedef NgenerateLargeArrayCopyN = ffi.Pointer<ffi.Void> Function(ffi.Int64);
+typedef NgenerateLargeArrayCopyD = ffi.Pointer<ffi.Void> Function(int);
+typedef NgenerateLargeArrayViewN = ffi.Pointer<ffi.Void> Function(ffi.Int64);
+typedef NgenerateLargeArrayViewD = ffi.Pointer<ffi.Void> Function(int);
+typedef NinitParticlesN = ffi.Pointer<ffi.Void> Function(ffi.Int64);
+typedef NinitParticlesD = ffi.Pointer<ffi.Void> Function(int);
+typedef NnimUpdateParticlesN = ffi.Void Function(ffi.Double);
+typedef NnimUpdateParticlesD = void Function(double);
 final _finalizerDeep = Finalizer<ffi.Pointer<ffi.Void>>((ptr) => _ocheFreeDeep(ptr));
 
 abstract class OcheView<T> extends ListBase<T> {
@@ -211,39 +139,31 @@ class _NativeListIterator<T> implements Iterator<T> {
   @override bool moveNext() => ++_index < _view.length;
 }
 class Oche {
-  late final nnbodyNimCall = dynlib.lookupFunction<NnbodyNimN, NnbodyNimD>('nbodyNim');
+  late final ngenerateLargeArrayCopyCall = dynlib.lookupFunction<NgenerateLargeArrayCopyN, NgenerateLargeArrayCopyD>('generateLargeArrayCopy');
 
-  double nbodyNim(final int v_iterations) {
-      final r = nnbodyNimCall(v_iterations); _checkError();
-      return r;
+  List<Vec3> generateLargeArrayCopy(final int v_n) {
+      final p = ngenerateLargeArrayCopyCall(v_n); _checkError();
+      if (p.address == 0) return []; try {
+        final L = ffi.Pointer<ffi.Int64>.fromAddress(p.address).value; final d = ffi.Pointer<NVec3>.fromAddress(p.address + 16);
+        return List<Vec3>.generate(L, (i) => Vec3._unpack(d[i]));
+      } finally { _ocheFreeDeep(p); }
   }
-  late final nfannkuchNimCall = dynlib.lookupFunction<NfannkuchNimN, NfannkuchNimD>('fannkuchNim');
+  late final ngenerateLargeArrayViewCall = dynlib.lookupFunction<NgenerateLargeArrayViewN, NgenerateLargeArrayViewD>('generateLargeArrayView');
 
-  int fannkuchNim(final int v_n) {
-      final r = nfannkuchNimCall(v_n); _checkError();
-      return r;
+  NativeListView<Vec3View> generateLargeArrayView(final int v_n) {
+      final p = ngenerateLargeArrayViewCall(v_n); _checkError();
+      return NativeListView<Vec3View>(p, (ptr) => Vec3View(ptr.cast<NVec3>().ref), ffi.sizeOf<NVec3>());
   }
-  late final ninitImageCall = dynlib.lookupFunction<NinitImageN, NinitImageD>('initImage');
+  late final ninitParticlesCall = dynlib.lookupFunction<NinitParticlesN, NinitParticlesD>('initParticles');
 
-  SharedListView<PixelView> initImage(final int v_w, final int v_h) {
-      final p = ninitImageCall(v_w, v_h); _checkError();
-      return SharedListView<PixelView>(p, (ptr) => PixelView(ptr.cast<NPixel>().ref), (p, v) { if (v is Pixel) { v._packManual(p.cast<NPixel>().ref); } else if (v is PixelView) { v._packInto(p.cast<NPixel>()); } }, ffi.sizeOf<NPixel>());
+  SharedListView<Vec3View> initParticles(final int v_n) {
+      final p = ninitParticlesCall(v_n); _checkError();
+      return SharedListView<Vec3View>(p, (ptr) => Vec3View(ptr.cast<NVec3>().ref), (p, v) { if (v is Vec3) { v._packManual(p.cast<NVec3>().ref); } else if (v is Vec3View) { v._packInto(p.cast<NVec3>()); } }, ffi.sizeOf<NVec3>());
   }
-  late final nprocessImageGrayscaleCall = dynlib.lookupFunction<NprocessImageGrayscaleN, NprocessImageGrayscaleD>('processImageGrayscale');
+  late final nnimUpdateParticlesCall = dynlib.lookupFunction<NnimUpdateParticlesN, NnimUpdateParticlesD>('nimUpdateParticles');
 
-  void processImageGrayscale() {
-      nprocessImageGrayscaleCall(); _checkError();
-  }
-  late final ninitEntitiesCall = dynlib.lookupFunction<NinitEntitiesN, NinitEntitiesD>('initEntities');
-
-  SharedListView<EntityView> initEntities(final int v_n) {
-      final p = ninitEntitiesCall(v_n); _checkError();
-      return SharedListView<EntityView>(p, (ptr) => EntityView(ptr.cast<NEntity>().ref), (p, v) { if (v is Entity) { v._packManual(p.cast<NEntity>().ref); } else if (v is EntityView) { v._packInto(p.cast<NEntity>()); } }, ffi.sizeOf<NEntity>());
-  }
-  late final ndetectCollisionsCall = dynlib.lookupFunction<NdetectCollisionsN, NdetectCollisionsD>('detectCollisions');
-
-  void detectCollisions() {
-      ndetectCollisionsCall(); _checkError();
+  void nimUpdateParticles(final double v_dt) {
+      nnimUpdateParticlesCall(v_dt); _checkError();
   }
 
 }
