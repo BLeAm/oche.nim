@@ -4,7 +4,7 @@ type
   Point {.oche.} = object
     x, y: float
 
-var globalShared: OcheShared[Point]
+var globalBuffer: OcheBuffer[Point]
 
 # 1. Standard Copy
 proc getPointsCopy(n: int): seq[Point] {.oche.} =
@@ -12,22 +12,27 @@ proc getPointsCopy(n: int): seq[Point] {.oche.} =
   for i in 0..<n:
     result[i] = Point(x: i.float, y: i.float * 2)
 
-# 2. View Mode (Zero-Copy from a seq - still has 1 initial copy to FFI buffer)
+# 2. Snapshot View (Read-Only)
 proc getPointsView(n: int): seq[Point] {.oche: view.} =
   result = newSeq[Point](n)
   for i in 0..<n:
     result[i] = Point(x: i.float, y: i.float * 2)
 
-# 3. Shared Mode (True Zero-Copy & Mutable)
-proc getPointsShared(n: int): OcheShared[Point] {.oche.} =
-  globalShared = newOcheShared[Point](n)
+# 3. Live Shared Buffer (Mutable + Auto ID + High Freq Optimization)
+proc getPointsShared(n: int): OcheBuffer[Point] {.oche.} =
+  globalBuffer = newOche[Point](n) # Using the new smart template!
   for i in 0..<n:
-    globalShared[i] = Point(x: i.float, y: i.float * 2)
-  return globalShared
+    globalBuffer[i] = Point(x: i.float, y: i.float * 2)
+  return globalBuffer
+
+# High frequency call test (Should be Lightning Fast, No Arena!)
+proc updatePointFast(idx: int, x: float) {.oche.} =
+  if idx < globalBuffer.len:
+    globalBuffer[idx].x = x
 
 proc printSharedPoint(idx: int) {.oche.} =
-  if idx < globalShared.len:
-    let p = globalShared[idx]
-    echo "Nim: globalShared[", idx, "] is now (", p.x, ", ", p.y, ")"
+  if idx < globalBuffer.len:
+    let p = globalBuffer[idx]
+    echo "Nim (Live): globalBuffer[", idx, "] is now (", p.x, ", ", p.y, ")"
 
 generate("nlib.dart")
