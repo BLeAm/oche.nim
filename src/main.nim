@@ -1,3 +1,4 @@
+import std/options
 import oche
 
 # ==========================================
@@ -37,8 +38,10 @@ var globalUsers: OcheBuffer[User]
 # Basic Primitives & Strings
 # ==========================================
 proc addNumbers(a: int, b: int): int {.oche.} = a + b
+proc addNumbersPy(a: int, b: int): int {.porche.} = a + b
 
 proc greet(name: string): string {.oche.} = "Hello, " & name
+proc greetPy(name: string): string {.porche.} = "Hello, " & name
 
 # ==========================================
 # Returning Structs & Enums
@@ -46,6 +49,12 @@ proc greet(name: string): string {.oche.} = "Hello, " & name
 proc createUser(name: string, tagId: int): User {.oche.} =
   User(
     username: toOcheStr(name), # Use toOcheStr for FFI safety!
+    status: Active,
+    primaryTag: Tag(name: toOcheStr("Tag_" & $tagId), id: tagId)
+  )
+proc createUserPy(name: string, tagId: int): User {.porche.} =
+  User(
+    username: toOcheStr(name),
     status: Active,
     primaryTag: Tag(name: toOcheStr("Tag_" & $tagId), id: tagId)
   )
@@ -62,6 +71,11 @@ proc sumPoints(points: seq[Point]): float {.oche.} =
 # The generated Dart code will manage the lifecycle of this sequence via GC Finalizers.
 proc getPointsCopy(n: int): seq[Point] {.oche.} =
   for i in 0..<n: result.add(Point(x: i.float, y: i.float))
+proc getPointsCopyPy(n: int): seq[Point] {.porche.} =
+  for i in 0..<n: result.add(Point(x: i.float, y: i.float))
+
+proc maybePoint(which: int): Option[Point] {.porche.} =
+  if which == 0: none[Point]() else: some(Point(x: 1.0, y: 2.0))
 
 # ==========================================
 # Returning Sequences (Zero-Copy View Mode)
@@ -102,3 +116,5 @@ proc printSharedUser(idx: int) {.oche.} =
 
 # Generate Dart bindings!
 generate("nlib.dart")
+# Generate Python bindings (porche)
+generatePython("nlib.py")
