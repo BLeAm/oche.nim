@@ -320,3 +320,37 @@ macro generatePython*(output: static string): untyped =
   code &= "\nporche = Porche()\n"
   writeFile(output, code)
   result = newEmptyNode()
+
+  var free = "proc ocheFree(p: pointer) {.exportc, dynlib.} = (if not p.isNil: dealloc(p))\n"
+
+  for s in structBanks.values:
+    free &= "proc ocheFreeInner" & s.name & "(o: ptr " & s.name & ") = \n"
+    for f in s.fields:
+      if f.typ.name in ["string", "cstring"]:
+        free &= "  if not o." & f.name & ".isNil: dealloc(cast[pointer](o." & f.name & "))\n"
+      elif structBanks.hasKey(f.typ.name) and not structBanks[f.typ.name].isPOD:
+        free &= "  ocheFreeInner" & f.typ.name & "(addr o." & f.name & ")\n"
+    if s.fields.allIt(it.typ.name notin ["string", "cstring"] and (not structBanks.hasKey(it.typ.name) or structBanks[it.typ.name].isPOD)): free &= "  discard\n"
+
+  free &= "proc ocheFreeInner(p: pointer, typeId: int32) {.exportc, dynlib.} = \n"
+  for s in structBanks.values:
+    free &= "  if typeId == " & $s.typeId & ": ocheFreeInner" & s.name & "(cast[ptr " & s.name & "](p)); return\n"
+  free &= "  discard\n\n"
+
+  free &= "proc ocheFreeDeep(p: pointer) {.exportc, dynlib.} = \n"
+  free &= "  if p.isNil: return\n"
+  free &= "  let flags = cast[ptr int32](cast[uint](p) + 12)[]\n"
+  free &= "  if (flags and int32(2)) != 0: dealloc(p); return\n"
+  free &= "  let L = cast[ptr int64](p)[]\n"
+  free &= "  let typeId = cast[ptr int32](cast[uint](p) + 8)[]\n"
+  for s in structBanks.values:
+    if not s.isPOD:
+      free &= "  if typeId == int32(" & $s.typeId & "):\n"
+      free &= "    let dataPtr = cast[uint](p) + 16\n"
+      free &= "    for i in 0 ..< L:\n"
+      free &= "      let o = cast[ptr " & s.name & "](dataPtr + uint(i * sizeof(" & s.name & ")))\n"
+      free &= "      ocheFreeInner" & s.name & "(o)\n"
+      free &= "    dealloc(p); return\n"
+  free &= "  dealloc(p)\n"
+
+  result = parseStmt(free)
