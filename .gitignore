@@ -9,3 +9,7 @@ libmain.so
 nimble.develop
 nimble.paths
 nimbledeps
+bench2.exe
+libbench2.so
+bench3.exe
+libbench3.so
