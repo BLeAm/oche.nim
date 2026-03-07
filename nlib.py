@@ -37,21 +37,46 @@ def _struct_from_ctypes(name, c):
   return d
 
 class _SharedView:
-  def __init__(self, ptr, n, elem_size, struct_name, free_fn, elem_ctype=None):
+  def __init__(self, ptr, n, elem_size, struct_name, free_fn, type_id=0, is_pod=True, elem_ctype=None, dtype=None):
     self._ptr = ptr
     self._n = n
     self._elem_size = elem_size
     self._struct_name = struct_name
     self._free_fn = free_fn
+    self._type_id = type_id
+    self._is_pod = is_pod
     self._elem_ctype = getattr(ctypes, elem_ctype) if isinstance(elem_ctype, str) else elem_ctype
+    self._dtype = dtype
   def __len__(self): return self._n
   def __getitem__(self, i):
     if self._struct_name:
       return _unpack_struct(self._struct_name, self._ptr, 16, self._elem_size, i)
     addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16 + i * self._elem_size
     return ctypes.cast(addr, ctypes.POINTER(self._elem_ctype)).contents.value
+  def __setitem__(self, i, v):
+    if i < 0 or i >= self._n: raise IndexError('Index out of range')
+    addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16 + i * self._elem_size
+    if self._struct_name:
+      # Free inner if not POD
+      if not self._is_pod:
+        _ocheFreeInner(ctypes.c_void_p(addr), self._type_id)
+      # Pack the new struct
+      if hasattr(v, '_as_buffer'):
+        ctypes.memmove(addr, v._as_buffer, self._elem_size)
+      else:
+        buf = _pack_struct(self._struct_name, v)
+        ctypes.memmove(addr, ctypes.addressof(buf), self._elem_size)
+    else:
+      # For primitives
+      ctypes.cast(addr, ctypes.POINTER(self._elem_ctype)).contents.value = v
   def __del__(self):
     if self._ptr is not None and self._free_fn: self._free_fn(self._ptr)
+  def to_numpy(self):
+    if not _HAS_NUMPY or self._struct_name: return None
+    data_addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16
+    if self._dtype:
+      return np.frombuffer((ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr), dtype=self._dtype, count=self._n)
+    return None
 _lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmain.so')
 _lib = ctypes.CDLL(_lib_path)
 
@@ -59,6 +84,9 @@ _lib.ocheFree.argtypes = [ctypes.c_void_p]
 _lib.ocheFree.restype = None
 _lib.ocheFreeDeep.argtypes = [ctypes.c_void_p]
 _lib.ocheFreeDeep.restype = None
+_ocheFreeInner = _lib.ocheFreeInner
+_ocheFreeInner.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+_ocheFreeInner.restype = None
 _oche_get_error = _lib.ocheGetError
 _oche_get_error.restype = ctypes.c_void_p
 def _check_error():
@@ -147,6 +175,17 @@ class Porche:
     if r is None: return None
     sz = _struct_size('Point')
     out = _unpack_struct('Point', r, 0, sz, 0); _lib.ocheFree(r); return out
+
+  _initSharedUsersPy = _lib.initSharedUsersPy
+  _initSharedUsersPy.argtypes = [ctypes.c_int64]
+  _initSharedUsersPy.restype = ctypes.c_void_p
+  def initSharedUsersPy(self, n: int) -> List[Any]:
+    r = self._initSharedUsersPy(n)
+    _check_error()
+    if r is None: return []
+    n = ctypes.cast(r, ctypes.POINTER(ctypes.c_int64)).contents.value
+    if n <= 0: return []
+    return _SharedView(r, n, _struct_size('User'), 'User', None, 3, False, None, 'None')
 
 
 porche = Porche()

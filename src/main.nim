@@ -109,6 +109,16 @@ proc initSharedUsers(n: int): OcheBuffer[User] {.oche.} =
     )
   return globalUsers
 
+proc initSharedUsersPy(n: int): OcheBuffer[User] {.porche.} =
+  globalUsers = newOche[User](n)
+  for i in 0..<n:
+    globalUsers[i] = User(
+      username: toOcheStr("User_" & $i),
+      status: Pending,
+      primaryTag: Tag(name: toOcheStr("Tag_" & $i), id: i)
+    )
+  return globalUsers
+
 proc printSharedUser(idx: int) {.oche.} =
   if idx < globalUsers.len:
     let u = globalUsers[idx]

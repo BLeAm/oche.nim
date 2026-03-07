@@ -156,14 +156,10 @@ proc genPInterface*(obj: OcheObject): string =
     result &= "    n = ctypes.cast(r, ctypes.POINTER(ctypes.c_int64)).contents.value\n"
     result &= "    if n <= 0: return []\n"
     if isStruct:
-      result &= "    return _SharedView(r, n, " & sz & ", '" & inner & "', None)\n"
+      let s = structBanks[inner]
+      result &= "    return _SharedView(r, n, " & sz & ", '" & inner & "', None, " & $s.typeId & ", " & (if s.isPOD: "True" else: "False") & ", None, '" & dtype & "')\n"
     else:
-      result &= "    data_addr = ctypes.cast(r, ctypes.c_void_p).value + 16\n"
-      result &= "    try:\n"
-      result &= "      import numpy as np\n"
-      result &= "      return np.frombuffer((ctypes.c_char * (n * " & sz & ")).from_address(data_addr), dtype=" & dtype & ", count=n)\n"
-      result &= "    except ImportError:\n"
-      result &= "      return _SharedView(r, n, " & sz & ", None, None, '" & toCType(inner) & "')\n"
+      result &= "    return _SharedView(r, n, " & sz & ", None, None, 0, True, '" & toCType(inner) & "', '" & dtype & "')\n"
   elif structBanks.hasKey(obj.retType.name):
     result &= "    if r is None: return None\n"
     result &= "    sz = _struct_size('" & obj.retType.name & "')\n"
@@ -208,19 +204,44 @@ def _struct_from_ctypes(name, c):
   return d
 
 class _SharedView:
-  def __init__(self, ptr, n, elem_size, struct_name, free_fn, elem_ctype=None):
+  def __init__(self, ptr, n, elem_size, struct_name, free_fn, type_id=0, is_pod=True, elem_ctype=None, dtype=None):
     self._ptr = ptr
     self._n = n
     self._elem_size = elem_size
     self._struct_name = struct_name
     self._free_fn = free_fn
+    self._type_id = type_id
+    self._is_pod = is_pod
     self._elem_ctype = getattr(ctypes, elem_ctype) if isinstance(elem_ctype, str) else elem_ctype
+    self._dtype = dtype
   def __len__(self): return self._n
   def __getitem__(self, i):
     if self._struct_name:
       return _unpack_struct(self._struct_name, self._ptr, 16, self._elem_size, i)
     addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16 + i * self._elem_size
     return ctypes.cast(addr, ctypes.POINTER(self._elem_ctype)).contents.value
+  def __setitem__(self, i, v):
+    if i < 0 or i >= self._n: raise IndexError('Index out of range')
+    addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16 + i * self._elem_size
+    if self._struct_name:
+      # Free inner if not POD
+      if not self._is_pod:
+        _ocheFreeInner(ctypes.c_void_p(addr), self._type_id)
+      # Pack the new struct
+      if hasattr(v, '_as_buffer'):
+        ctypes.memmove(addr, v._as_buffer, self._elem_size)
+      else:
+        buf = _pack_struct(self._struct_name, v)
+        ctypes.memmove(addr, ctypes.addressof(buf), self._elem_size)
+    else:
+      # For primitives
+      ctypes.cast(addr, ctypes.POINTER(self._elem_ctype)).contents.value = v
   def __del__(self):
     if self._ptr is not None and self._free_fn: self._free_fn(self._ptr)
+  def to_numpy(self):
+    if not _HAS_NUMPY or self._struct_name: return None
+    data_addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16
+    if self._dtype:
+      return np.frombuffer((ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr), dtype=self._dtype, count=self._n)
+    return None
 """
