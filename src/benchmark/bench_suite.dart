@@ -199,27 +199,27 @@ void main() {
   run(
     "1. N-Body (10,000,000 iterations)",
     () => nbodyDart(10000000),
-    () => nbodyNim(10000000),
+    () => oche.nbodyNim(10000000),
   );
   run(
     "2. Fannkuch-Redux (N=11)",
     () => fannkuchDart(11),
-    () => fannkuchNim(11),
+    () => oche.fannkuchNim(11),
   );
   run(
     "3. Spectral-Norm (N=1500)",
     () => spectralNormDart(1500),
-    () => spectralNormNim(1500),
+    () => oche.spectralNormNim(1500),
   );
   run(
     "4. Binary-Trees (Depth=17)",
     () => binaryTreesDart(17),
-    () => binaryTreesNim(17),
+    () => oche.binaryTreesNim(17),
   );
   run(
     "5. Mandelbrot (N=1000)",
     () => mandelbrotDart(1000),
-    () => mandelbrotNim(1000),
+    () => oche.mandelbrotNim(1000),
   );
 
   print("\n==========================================");

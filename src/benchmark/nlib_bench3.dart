@@ -3,7 +3,7 @@ import 'dart:io' show Platform;
 import 'dart:collection';
 import 'package:ffi/ffi.dart';
 
-final String _libName = Platform.isWindows ? 'libmain.dll' : (Platform.isMacOS ? 'libmain.dylib' : 'libmain.so');
+final String _libName = Platform.isWindows ? 'libbench3.dll' : (Platform.isMacOS ? 'libbench3.dylib' : 'libbench3.so');
 final dynlib = ffi.DynamicLibrary.open('./$_libName');
 final _ocheFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFree');
 final _ocheFreeDeep = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFreeDeep');
@@ -40,7 +40,7 @@ class Vec3 {
     required this.z
   });
 
-  void _pack(NVec3 target, ffi.Allocator a) {
+  void _pack(NVec3 target, ffi.Allocator alloc) {
     target.x = x;
     target.y = y;
     target.z = z;

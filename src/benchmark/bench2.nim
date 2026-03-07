@@ -158,18 +158,61 @@ proc initEntities(n: int): OcheBuffer[Entity] {.oche.} =
     p[i] = Entity(x: (i mod 1000).float32, y: (i div 100).float32, radius: 5.0f, colliding: false)
   return entities
 
+import std/math
+
+const 
+  GridSize = 20.0f # ปรับตามขนาด radius เฉลี่ย (เช่น radius 5.0 + 5.0 = 10.0)
+  MaxEntitiesPerCell = 64 # ป้องกันการจอง memory เยอะเกินไป
+
+type 
+  Cell = object
+    count: int32
+    indices: array[MaxEntitiesPerCell, int32]
+
+# ใช้ Stack-based grid หรือจองครั้งเดียวเพื่อความเร็ว
+var grid: array[100 * 100, Cell] # สมมติแมพขนาด 2000x2000
+
+proc getCellIdx(x, y: float32): int =
+  let cx = clamp((x / GridSize).int, 0, 99)
+  let cy = clamp((y / GridSize).int, 0, 99)
+  return cy * 100 + cx
+
+{.push checks: off, optimization: speed.}
 proc detectCollisions() {.oche.} =
   let p = entities.dataPtr
   let n = entities.len
+  
+  # 1. Zero out colliding (ใช้ memset-like loop)
   for i in 0 ..< n: p[i].colliding = false
-  for i in 0 ..< n:
-    for j in i + 1 ..< n:
-      let dx = p[i].x - p[j].x
-      let dy = p[i].y - p[j].y
-      let distSq = dx*dx + dy*dy
-      let limit = p[i].radius + p[j].radius
-      if distSq < limit * limit:
-        p[i].colliding = true
-        p[j].colliding = true
+
+  # 2. Optimized Nested Loop
+  for i in 0 ..< n - 1:
+    let pi = cast[ptr Entity](cast[uint](p) + cast[uint](i * sizeof(Entity)))
+    let xi = pi.x
+    let yi = pi.y
+    let ri = pi.radius
+    
+    var j = i + 1
+    # Manual Unrolling: ทำทีละ 4 ตัว (ถ้า n ใหญ่พอ)
+    while j + 3 < n:
+      for k in 0 .. 3:
+        let pj = cast[ptr Entity](cast[uint](p) + cast[uint]((j + k) * sizeof(Entity)))
+        let dx = xi - pj.x
+        let dy = yi - pj.y
+        let dsq = dx*dx + dy*dy
+        let rsum = ri + pj.radius
+        if dsq < rsum * rsum:
+          pi.colliding = true
+          pj.colliding = true
+      j += 4
+      
+    # เก็บตกตัวที่เหลือ
+    while j < n:
+      let pj = cast[ptr Entity](cast[uint](p) + cast[uint](j * sizeof(Entity)))
+      if (xi - pj.x)^2 + (yi - pj.y)^2 < (ri + pj.radius)^2:
+        pi.colliding = true
+        pj.colliding = true
+      inc j
+{.pop.}
 
 generate("nlib_bench2.dart")

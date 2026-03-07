@@ -3,7 +3,7 @@ import 'dart:io' show Platform;
 import 'dart:collection';
 import 'package:ffi/ffi.dart';
 
-final String _libName = Platform.isWindows ? 'libmain.dll' : (Platform.isMacOS ? 'libmain.dylib' : 'libmain.so');
+final String _libName = Platform.isWindows ? 'libbench2.dll' : (Platform.isMacOS ? 'libbench2.dylib' : 'libbench2.so');
 final dynlib = ffi.DynamicLibrary.open('./$_libName');
 final _ocheFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFree');
 final _ocheFreeDeep = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFreeDeep');

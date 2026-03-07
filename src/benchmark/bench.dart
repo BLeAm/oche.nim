@@ -70,14 +70,14 @@ void main() {
   runBench(
     "Monte Carlo Pi ($iters iterations)",
     () => monteCarloPiDart(iters),
-    () => monteCarloPiNim(iters),
+    () => oche.monteCarloPiNim(iters),
   );
 
   // CASE B: Complex Graphics Math (1000x1000)
   runBench(
     "Mandelbrot Fractal (1000x1000 pixels)",
     () => mandelbrotDart(1000, 1000, 1000),
-    () => mandelbrotNim(1000, 1000, 1000),
+    () => oche.mandelbrotNim(1000, 1000, 1000),
   );
 
   print("\n==========================================");

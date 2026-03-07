@@ -13,3 +13,5 @@ bench2.exe
 libbench2.so
 bench3.exe
 libbench3.so
+*.exe
+*.so
