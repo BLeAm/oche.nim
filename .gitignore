@@ -16,3 +16,4 @@ libbench3.so
 *.exe
 *.so
 *.pyc
+*.pyo
