@@ -17,3 +17,5 @@ libbench3.so
 *.so
 *.pyc
 *.pyo
+debug.txt
+dresult.txt 

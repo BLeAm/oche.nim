@@ -91,7 +91,7 @@ class _SharedView:
     if self._dtype:
       return np.frombuffer((ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr), dtype=self._dtype, count=self._n)
     return None
-_lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libbench_full.so')
+_lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmain.so')
 _lib = ctypes.CDLL(_lib_path)
 
 _lib.ocheFree.argtypes = [ctypes.c_void_p]
@@ -110,55 +110,96 @@ def _check_error():
         _lib.ocheFree(p)
         raise RuntimeError('NimError: ' + msg)
 
-class Body_t(ctypes.Structure):
+class Point_t(ctypes.Structure):
   _fields_ = [
     ('x', ctypes.c_double),
     ('y', ctypes.c_double),
-    ('z', ctypes.c_double),
-    ('vx', ctypes.c_double),
-    ('vy', ctypes.c_double),
-    ('vz', ctypes.c_double),
-    ('mass', ctypes.c_double),
   ]
-_struct_size_cache['Body'] = ctypes.sizeof(Body_t)
-_struct_types['Body'] = Body_t
+_struct_size_cache['Point'] = ctypes.sizeof(Point_t)
+_struct_types['Point'] = Point_t
 
-class Vec3_t(ctypes.Structure):
+class Tag_t(ctypes.Structure):
   _fields_ = [
-    ('x', ctypes.c_double),
-    ('y', ctypes.c_double),
-    ('z', ctypes.c_double),
+    ('name', ctypes.c_void_p),
+    ('id', ctypes.c_int64),
   ]
-_struct_size_cache['Vec3'] = ctypes.sizeof(Vec3_t)
-_struct_types['Vec3'] = Vec3_t
+_struct_size_cache['Tag'] = ctypes.sizeof(Tag_t)
+_struct_types['Tag'] = Tag_t
+
+class User_t(ctypes.Structure):
+  _fields_ = [
+    ('username', ctypes.c_void_p),
+    ('status', ctypes.c_int32),
+    ('primaryTag', ctypes.c_void_p),
+  ]
+_struct_size_cache['User'] = ctypes.sizeof(User_t)
+_struct_types['User'] = User_t
+
+class Status:
+  Active = 0
+  Inactive = 1
+  Pending = 2
 
 class Porche:
-  _nbodyNim = _lib.nbodyNim
-  _nbodyNim.argtypes = [ctypes.c_int64]
-  _nbodyNim.restype = ctypes.c_double
-  def nbodyNim(self, n: int) -> float:
-    r = self._nbodyNim(n)
+  _addNumbersPy = _lib.addNumbersPy
+  _addNumbersPy.argtypes = [ctypes.c_int64, ctypes.c_int64]
+  _addNumbersPy.restype = ctypes.c_int64
+  def addNumbersPy(self, a: int, b: int) -> int:
+    r = self._addNumbersPy(a, b)
     _check_error()
     return r
 
-  _spectralNormNim = _lib.spectralNormNim
-  _spectralNormNim.argtypes = [ctypes.c_int64]
-  _spectralNormNim.restype = ctypes.c_double
-  def spectralNormNim(self, n: int) -> float:
-    r = self._spectralNormNim(n)
+  _greetPy = _lib.greetPy
+  _greetPy.argtypes = [ctypes.c_char_p]
+  _greetPy.restype = ctypes.c_void_p
+  def greetPy(self, name: str) -> str:
+    r = self._greetPy(name.encode('utf-8') if name else None)
     _check_error()
-    return r
+    if r is None: return ''
+    s = ctypes.string_at(r).decode('utf-8'); _lib.ocheFree(r); return s
 
-  _generateLargeArrayView = _lib.generateLargeArrayView
-  _generateLargeArrayView.argtypes = [ctypes.c_int64]
-  _generateLargeArrayView.restype = ctypes.c_void_p
-  def generateLargeArrayView(self, n: int) -> List[Any]:
-    r = self._generateLargeArrayView(n)
+  _createUserPy = _lib.createUserPy
+  _createUserPy.argtypes = [ctypes.c_char_p, ctypes.c_int64]
+  _createUserPy.restype = ctypes.c_void_p
+  def createUserPy(self, name: str, tagId: int) -> Any:
+    r = self._createUserPy(name.encode('utf-8') if name else None, tagId)
+    _check_error()
+    if r is None: return None
+    sz = _struct_size('User')
+    return _unpack_struct('User', r, 0, sz, 0)
+
+  _getPointsCopyPy = _lib.getPointsCopyPy
+  _getPointsCopyPy.argtypes = [ctypes.c_int64]
+  _getPointsCopyPy.restype = ctypes.c_void_p
+  def getPointsCopyPy(self, n: int) -> List[Any]:
+    r = self._getPointsCopyPy(n)
+    _check_error()
+    if r is None: return []
+    n = ctypes.cast(r, ctypes.POINTER(ctypes.c_int64)).contents.value
+    if n <= 0: _lib.ocheFreeDeep(r); return []
+    out = [_unpack_struct('Point', r, 16, _struct_size('Point'), i) for i in range(n)]
+    _lib.ocheFreeDeep(r); return out
+
+  _maybePoint = _lib.maybePoint
+  _maybePoint.argtypes = [ctypes.c_int64]
+  _maybePoint.restype = ctypes.c_void_p
+  def maybePoint(self, which: int) -> Optional[Any]:
+    r = self._maybePoint(which)
+    _check_error()
+    if r is None: return None
+    sz = _struct_size('Point')
+    out = _unpack_struct('Point', r, 0, sz, 0); _lib.ocheFree(r); return out
+
+  _initSharedUsersPy = _lib.initSharedUsersPy
+  _initSharedUsersPy.argtypes = [ctypes.c_int64]
+  _initSharedUsersPy.restype = ctypes.c_void_p
+  def initSharedUsersPy(self, n: int) -> List[Any]:
+    r = self._initSharedUsersPy(n)
     _check_error()
     if r is None: return []
     n = ctypes.cast(r, ctypes.POINTER(ctypes.c_int64)).contents.value
     if n <= 0: return []
-    return _SharedView(r, n, _struct_size('Vec3'), 'Vec3', None, 2, True, None, 'None')
+    return _SharedView(r, n, _struct_size('User'), 'User', None, 3, False, None, 'None')
 
 
 porche = Porche()
