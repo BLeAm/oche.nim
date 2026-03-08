@@ -72,9 +72,22 @@ class _SharedView:
   def __del__(self):
     if self._ptr is not None and self._free_fn: self._free_fn(self._ptr)
   def to_numpy(self):
-    if not _HAS_NUMPY: return None # ยอมให้ Struct ผ่านเข้ามาได้
+    # return a numpy array view of the buffer if numpy is available
+    if not _HAS_NUMPY:
+      return None
     data_addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16
-    if self._dtype and self._dtype != 'None': # เช็คว่าไม่ใช่ String 'None'
+    if self._struct_name:
+      # support struct arrays by building a structured dtype from the ctypes type
+      t = _struct_types.get(self._struct_name)
+      if t is None:
+        return None
+      try:
+        dt = np.dtype(t)
+      except Exception:
+        return None
+      buf = (ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr)
+      return np.frombuffer(buf, dtype=dt, count=self._n)
+    if self._dtype:
       return np.frombuffer((ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr), dtype=self._dtype, count=self._n)
     return None
 _lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libbench_full.so')
@@ -144,7 +157,7 @@ class Porche:
     if r is None: return []
     n = ctypes.cast(r, ctypes.POINTER(ctypes.c_int64)).contents.value
     if n <= 0: return []
-    return _SharedView(r, n, _struct_size('Vec3'), 'Vec3', None, 2, True, None, [('x', 'f8'), ('y', 'f8'), ('z', 'f8')])
+    return _SharedView(r, n, _struct_size('Vec3'), 'Vec3', None, 2, True, None, 'None')
 
 
 porche = Porche()

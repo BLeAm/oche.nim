@@ -72,8 +72,20 @@ class _SharedView:
   def __del__(self):
     if self._ptr is not None and self._free_fn: self._free_fn(self._ptr)
   def to_numpy(self):
-    if not _HAS_NUMPY or self._struct_name: return None
+    # return NumPy view of the underlying buffer if possible
+    if not _HAS_NUMPY:
+      return None
     data_addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16
+    if self._struct_name:
+      t = _struct_types.get(self._struct_name)
+      if t is None:
+        return None
+      try:
+        dt = np.dtype(t)
+      except Exception:
+        return None
+      buf = (ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr)
+      return np.frombuffer(buf, dtype=dt, count=self._n)
     if self._dtype:
       return np.frombuffer((ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr), dtype=self._dtype, count=self._n)
     return None
