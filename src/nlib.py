@@ -11,13 +11,16 @@ try:
 except ImportError:
   _HAS_NUMPY = False
 
-_struct_size_cache = {}
-_struct_types = {}
-_struct_field_meta = {}
-def _struct_size(name):
+_struct_size_cache: dict = {}
+_struct_types: dict = {}
+_struct_field_meta: dict = {}
+
+def _struct_size(name: str) -> int:
   return _struct_size_cache.get(name, 8)
 
-def _pack_struct(name, obj):
+# -- Copy-mode helpers --
+
+def _pack_struct(name: str, obj):
   if obj is None: return None
   t = _struct_types[name]
   if hasattr(obj, '_as_buffer'): return obj
@@ -26,84 +29,105 @@ def _pack_struct(name, obj):
     setattr(buf, k, v)
   return buf
 
-def _unpack_struct(name, ptr, offset, elem_size, index):
-  t = _struct_types[name]
-  p = ctypes.cast(ctypes.c_void_p(ctypes.addressof(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_char)).contents) + offset + index * elem_size), ctypes.POINTER(t))
-  return _struct_from_ctypes(name, p.contents)
+def _struct_copy(name: str, ptr, offset: int, elem_size: int, index: int) -> dict:
+  addr = ctypes.cast(ptr, ctypes.c_void_p).value + offset + index * elem_size
+  return _struct_from_ctypes(name, _struct_types[name].from_address(addr))
 
-def _struct_from_ctypes(name, c):
+def _struct_from_ctypes(name: str, c) -> dict:
   d = {}
   meta = _struct_field_meta.get(name, {})
   for (fname, _) in c._fields_:
     raw = getattr(c, fname)
     kind, extra = meta.get(fname, ('pod', None))
     if kind == 'string':
-      if raw is None or raw == 0:
-        d[fname] = None
-      else:
-        d[fname] = ctypes.string_at(raw).decode('utf-8')
+      d[fname] = ctypes.string_at(raw).decode('utf-8') if raw else None
     elif kind == 'struct':
-      # nested struct is inline (embedded), raw is already the ctypes struct object
       d[fname] = _struct_from_ctypes(extra, raw)
     else:
       d[fname] = raw
   return d
 
-class _SharedView:
-  def __init__(self, ptr, n, elem_size, struct_name, free_fn, type_id=0, is_pod=True, elem_ctype=None, dtype=None):
+# -- NativeListView (view mode: zero-copy, read-only) --
+
+class NativeListView:
+  __slots__ = ('_ptr', '_n', '_elem_size', '_unpacker', '_free_fn', '_elem_ctype')
+  def __init__(self, ptr, unpacker, elem_size: int, free_fn, elem_ctype=None):
+    self._ptr = ptr
+    self._n = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_int64)).contents.value if ptr else 0
+    self._elem_size = elem_size
+    self._unpacker = unpacker
+    self._free_fn = free_fn
+    self._elem_ctype = getattr(ctypes, elem_ctype) if isinstance(elem_ctype, str) else elem_ctype
+  def __len__(self): return self._n
+  def __getitem__(self, i):
+    if i < 0 or i >= self._n: raise IndexError('index out of range')
+    addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16 + i * self._elem_size
+    if self._unpacker: return self._unpacker(addr)
+    return ctypes.cast(addr, ctypes.POINTER(self._elem_ctype)).contents.value
+  def __setitem__(self, i, v):
+    raise TypeError('NativeListView is read-only. Use SharedListView for mutation.')
+  def __iter__(self):
+    for i in range(self._n): yield self[i]
+  def __del__(self):
+    if self._ptr and self._free_fn: self._free_fn(self._ptr)
+  def to_list(self) -> list:
+    return [self[i] for i in range(self._n)]
+  def to_numpy(self):
+    if not _HAS_NUMPY or self._unpacker: return None
+    data_addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16
+    dt = np.dtype(self._elem_ctype)
+    return np.frombuffer(
+      (ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr),
+      dtype=dt, count=self._n).copy()
+
+# -- SharedListView (share mode: zero-copy, read-write) --
+
+class SharedListView:
+  __slots__ = ('_ptr', '_n', '_elem_size', '_unpacker', '_type_id', '_is_pod', '_elem_ctype')
+  def __init__(self, ptr, n: int, elem_size: int, unpacker, type_id: int = 0,
+               is_pod: bool = True, elem_ctype=None):
     self._ptr = ptr
     self._n = n
     self._elem_size = elem_size
-    self._struct_name = struct_name
-    self._free_fn = free_fn
+    self._unpacker = unpacker
     self._type_id = type_id
     self._is_pod = is_pod
     self._elem_ctype = getattr(ctypes, elem_ctype) if isinstance(elem_ctype, str) else elem_ctype
-    self._dtype = dtype
   def __len__(self): return self._n
   def __getitem__(self, i):
-    if self._struct_name:
-      return _unpack_struct(self._struct_name, self._ptr, 16, self._elem_size, i)
+    if i < 0 or i >= self._n: raise IndexError('index out of range')
     addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16 + i * self._elem_size
+    if self._unpacker: return self._unpacker(addr)
     return ctypes.cast(addr, ctypes.POINTER(self._elem_ctype)).contents.value
   def __setitem__(self, i, v):
-    if i < 0 or i >= self._n: raise IndexError('Index out of range')
+    if i < 0 or i >= self._n: raise IndexError('index out of range')
     addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16 + i * self._elem_size
-    if self._struct_name:
-      # Free inner if not POD
-      if not self._is_pod:
-        _ocheFreeInner(ctypes.c_void_p(addr), self._type_id)
-      # Pack the new struct
-      if hasattr(v, '_as_buffer'):
-        ctypes.memmove(addr, v._as_buffer, self._elem_size)
+    if self._unpacker:
+      if not self._is_pod: _ocheFreeInner(ctypes.c_void_p(addr), self._type_id)
+      if hasattr(v, '_addr'):
+        ctypes.memmove(addr, v._addr, self._elem_size)
       else:
-        buf = _pack_struct(self._struct_name, v)
+        struct_name = None
+        for sn, st in _struct_types.items():
+          if ctypes.sizeof(st) == self._elem_size: struct_name = sn; break
+        if struct_name is None:
+          raise TypeError(f'Cannot infer struct type for SharedListView elem_size={self._elem_size}')
+        buf = _pack_struct(struct_name, v)
         ctypes.memmove(addr, ctypes.addressof(buf), self._elem_size)
     else:
-      # For primitives
       ctypes.cast(addr, ctypes.POINTER(self._elem_ctype)).contents.value = v
-  def __del__(self):
-    if self._ptr is not None and self._free_fn: self._free_fn(self._ptr)
+  def __iter__(self):
+    for i in range(self._n): yield self[i]
+  def to_list(self) -> list:
+    return [self[i] for i in range(self._n)]
   def to_numpy(self):
-    # convert shared buffer into a NumPy array if possible
-    if not _HAS_NUMPY:
-      return None
+    if not _HAS_NUMPY or self._unpacker: return None
     data_addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16
-    if self._struct_name:
-      # when the elements are structs we can still create a structured dtype
-      t = _struct_types.get(self._struct_name)
-      if t is None:
-        return None
-      try:
-        dt = np.dtype(t)
-      except Exception:
-        return None
-      buf = (ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr)
-      return np.frombuffer(buf, dtype=dt, count=self._n)
-    # primitive array path
-    if self._dtype:
-      return np.frombuffer((ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr), dtype=self._dtype, count=self._n)
-    return None
+    dt = np.dtype(self._elem_ctype)
+    return np.frombuffer(
+      (ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr),
+      dtype=dt, count=self._n)
+
 _lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmain.so')
 _lib = ctypes.CDLL(_lib_path)
 
@@ -134,6 +158,30 @@ _struct_field_meta['Point'] = {
   'x': ('pod', None),
   'y': ('pod', None),
 }
+_OFF_Point_x = Point_t.x.offset
+_OFF_Point_y = Point_t.y.offset
+class PointView:
+  """Zero-copy view into a Point in Nim memory. No dict allocated until .to_dict()."""
+  __slots__ = ('_addr',)
+  def __init__(self, addr: int):
+    self._addr = addr
+  @property
+  def x(self) -> float:
+    return ctypes.c_double.from_address(self._addr + _OFF_Point_x).value
+  @x.setter
+  def x(self, v: float):
+    ctypes.c_double.from_address(self._addr + _OFF_Point_x).value = v
+  @property
+  def y(self) -> float:
+    return ctypes.c_double.from_address(self._addr + _OFF_Point_y).value
+  @y.setter
+  def y(self, v: float):
+    ctypes.c_double.from_address(self._addr + _OFF_Point_y).value = v
+  def to_dict(self) -> dict:
+    """Materialise to a plain dict (triggers copy — use sparingly)."""
+    return _struct_from_ctypes('Point', Point_t.from_address(self._addr))
+  def __repr__(self):
+    return 'PointView(' + str(self.to_dict()) + ')'
 
 class Tag_t(ctypes.Structure):
   _fields_ = [
@@ -146,6 +194,28 @@ _struct_field_meta['Tag'] = {
   'name': ('string', None),
   'id': ('pod', None),
 }
+_OFF_Tag_name = Tag_t.name.offset
+_OFF_Tag_id = Tag_t.id.offset
+class TagView:
+  """Zero-copy view into a Tag in Nim memory. No dict allocated until .to_dict()."""
+  __slots__ = ('_addr',)
+  def __init__(self, addr: int):
+    self._addr = addr
+  @property
+  def name(self) -> Optional[str]:
+    p = ctypes.c_void_p.from_address(self._addr + _OFF_Tag_name).value
+    return ctypes.string_at(p).decode('utf-8') if p else None
+  @property
+  def id(self) -> int:
+    return ctypes.c_int64.from_address(self._addr + _OFF_Tag_id).value
+  @id.setter
+  def id(self, v: int):
+    ctypes.c_int64.from_address(self._addr + _OFF_Tag_id).value = v
+  def to_dict(self) -> dict:
+    """Materialise to a plain dict (triggers copy — use sparingly)."""
+    return _struct_from_ctypes('Tag', Tag_t.from_address(self._addr))
+  def __repr__(self):
+    return 'TagView(' + str(self.to_dict()) + ')'
 
 class User_t(ctypes.Structure):
   _fields_ = [
@@ -160,6 +230,32 @@ _struct_field_meta['User'] = {
   'status': ('pod', None),
   'primaryTag': ('struct', 'Tag'),
 }
+_OFF_User_username = User_t.username.offset
+_OFF_User_status = User_t.status.offset
+_OFF_User_primaryTag = User_t.primaryTag.offset
+class UserView:
+  """Zero-copy view into a User in Nim memory. No dict allocated until .to_dict()."""
+  __slots__ = ('_addr',)
+  def __init__(self, addr: int):
+    self._addr = addr
+  @property
+  def username(self) -> Optional[str]:
+    p = ctypes.c_void_p.from_address(self._addr + _OFF_User_username).value
+    return ctypes.string_at(p).decode('utf-8') if p else None
+  @property
+  def status(self) -> int:
+    return ctypes.c_int32.from_address(self._addr + _OFF_User_status).value
+  @status.setter
+  def status(self, v: int):
+    ctypes.c_int32.from_address(self._addr + _OFF_User_status).value = int(v)
+  @property
+  def primaryTag(self) -> 'TagView':
+    return TagView(self._addr + _OFF_User_primaryTag)
+  def to_dict(self) -> dict:
+    """Materialise to a plain dict (triggers copy — use sparingly)."""
+    return _struct_from_ctypes('User', User_t.from_address(self._addr))
+  def __repr__(self):
+    return 'UserView(' + str(self.to_dict()) + ')'
 
 class Status:
   Active = 0
@@ -192,7 +288,8 @@ class Porche:
     _check_error()
     if r is None: return None
     sz = _struct_size('User')
-    return _unpack_struct('User', r, 0, sz, 0)
+    out = _struct_copy('User', r, 0, sz, 0)
+    _lib.ocheFree(r); return out
 
   _getPointsCopyPy = _lib.getPointsCopyPy
   _getPointsCopyPy.argtypes = [ctypes.c_int64]
@@ -203,7 +300,7 @@ class Porche:
     if r is None: return []
     n = ctypes.cast(r, ctypes.POINTER(ctypes.c_int64)).contents.value
     if n <= 0: _lib.ocheFreeDeep(r); return []
-    out = [_unpack_struct('Point', r, 16, _struct_size('Point'), i) for i in range(n)]
+    out = [_struct_copy('Point', r, 16, _struct_size('Point'), i) for i in range(n)]
     _lib.ocheFreeDeep(r); return out
 
   _maybePoint = _lib.maybePoint
@@ -214,18 +311,18 @@ class Porche:
     _check_error()
     if r is None: return None
     sz = _struct_size('Point')
-    out = _unpack_struct('Point', r, 0, sz, 0); _lib.ocheFree(r); return out
+    out = _struct_copy('Point', r, 0, sz, 0); _lib.ocheFree(r); return out
 
   _initSharedUsersPy = _lib.initSharedUsersPy
   _initSharedUsersPy.argtypes = [ctypes.c_int64]
   _initSharedUsersPy.restype = ctypes.c_void_p
-  def initSharedUsersPy(self, n: int) -> List[Any]:
+  def initSharedUsersPy(self, n: int) -> 'SharedListView':
     r = self._initSharedUsersPy(n)
     _check_error()
     if r is None: return []
     n = ctypes.cast(r, ctypes.POINTER(ctypes.c_int64)).contents.value
     if n <= 0: return []
-    return _SharedView(r, n, _struct_size('User'), 'User', None, 3, False, None, 'None')
+    return SharedListView(r, n, _struct_size('User'), lambda addr: UserView(addr), 3, False)
 
 
 porche = Porche()
