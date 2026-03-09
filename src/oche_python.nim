@@ -45,9 +45,14 @@ proc toPythonReturnType*(obj: OcheObject): string =
   if obj.retType.isOption: return "Optional[" & toPythonType(obj.retType.inner) & "]"
   if obj.retType.isSeq:
     if obj.isView: return "'NativeListView'"
-    else: return "List[Any]"
+    else:
+      let inner = obj.retType.inner
+      if structBanks.hasKey(inner): return "List['" & inner & "View']"
+      else: return "List[Any]"
   if obj.retType.isShared: return "'SharedListView'"
-  if structBanks.hasKey(obj.retType.name): return "Any"
+  if structBanks.hasKey(obj.retType.name):
+    if obj.isView: return "'" & obj.retType.name & "View'"
+    else: return "'" & obj.retType.name & "View'"  # both modes return XxxView now
   if enumBanks.hasKey(obj.retType.name): return "int"
   return toPythonType(obj.retType.name)
 
@@ -87,7 +92,6 @@ proc genPStruct*(s: OcheStruct): string =
   result &= "  ]\n"
   result &= "_struct_size_cache['" & s.name & "'] = ctypes.sizeof(" & s.name & "_t)\n"
   result &= "_struct_types['" & s.name & "'] = " & s.name & "_t\n"
-
   # ── 2. Field metadata (copy-mode decode) ─────────────────────────────────
   result &= "_struct_field_meta['" & s.name & "'] = {\n"
   for f in s.fields:
@@ -104,27 +108,31 @@ proc genPStruct*(s: OcheStruct): string =
     result &= "_OFF_" & s.name & "_" & f.name &
               " = " & s.name & "_t." & f.name & ".offset\n"
 
-  # ── 4. XxxView: zero-copy view class ─────────────────────────────────────
+  # ── 4. XxxView: unified view class used by ALL modes ─────────────────────
+  # _owned=True  → copy mode: Python allocated, __del__ calls ocheFree
+  # _owned=False → view/share mode: Nim owns, Python must not free
   result &= "class " & s.name & "View:\n"
-  result &= "  \"\"\"Zero-copy view into a " & s.name &
-            " in Nim memory. No dict allocated until .to_dict().\"\"\"\n"
-  result &= "  __slots__ = ('_addr',)\n"
-  result &= "  def __init__(self, addr: int):\n"
+  result &= "  __slots__ = ('_addr', '_owned')\n"
+  result &= "  def __init__(self, addr: int, owned: bool = False):\n"
   result &= "    self._addr = addr\n"
+  result &= "    self._owned = owned\n"
+  result &= "  def __del__(self):\n"
+  result &= "    if self._owned and self._addr:\n"
+  result &= "      _lib.ocheFree(ctypes.c_void_p(self._addr))\n"
+  result &= "      self._addr = 0\n"
 
   for f in s.fields:
     let offExpr = "_OFF_" & s.name & "_" & f.name
     if f.typ.name in ["string", "cstring"]:
-      # Read: dereference pointer → decode UTF-8 (one Python str allocation)
       result &= "  @property\n"
       result &= "  def " & f.name & "(self) -> Optional[str]:\n"
       result &= "    p = ctypes.c_void_p.from_address(self._addr + " & offExpr & ").value\n"
       result &= "    return ctypes.string_at(p).decode('utf-8') if p else None\n"
     elif structBanks.hasKey(f.typ.name):
-      # Nested inline struct → another StructView at the correct sub-offset
+      # nested inline struct: always owned=False — parent controls the memory
       result &= "  @property\n"
       result &= "  def " & f.name & "(self) -> '" & f.typ.name & "View':\n"
-      result &= "    return " & f.typ.name & "View(self._addr + " & offExpr & ")\n"
+      result &= "    return " & f.typ.name & "View(self._addr + " & offExpr & ", owned=False)\n"
     elif enumBanks.hasKey(f.typ.name):
       result &= "  @property\n"
       result &= "  def " & f.name & "(self) -> int:\n"
@@ -143,11 +151,11 @@ proc genPStruct*(s: OcheStruct): string =
       result &= "    " & ct & ".from_address(self._addr + " & offExpr & ").value = v\n"
 
   result &= "  def to_dict(self) -> dict:\n"
-  result &= "    \"\"\"Materialise to a plain dict (triggers copy — use sparingly).\"\"\"\n"
   result &= "    return _struct_from_ctypes('" & s.name &
             "', " & s.name & "_t.from_address(self._addr))\n"
   result &= "  def __repr__(self):\n"
   result &= "    return '" & s.name & "View(' + str(self.to_dict()) + ')'\n"
+  result &= "_struct_view_types['" & s.name & "'] = " & s.name & "View\n"
   result &= "\n"
 
 # ---------------------------------------------------------------------------
@@ -230,15 +238,15 @@ proc genPInterface*(obj: OcheObject): string =
     result &= "    n = ctypes.cast(r, ctypes.POINTER(ctypes.c_int64)).contents.value\n"
     result &= "    if n <= 0: _lib.ocheFreeDeep(r); return []\n"
     if obj.isView:
-      # ── VIEW MODE ─────────────────────────────────────────────────────────
+      # ── VIEW MODE: NativeListView of XxxView(owned=False) ─────────────────
       if isStruct:
-        result &= "    return NativeListView(r, lambda addr: " & inner & "View(addr), " & sz & ", _lib.ocheFreeDeep)\n"
+        result &= "    return NativeListView(r, lambda addr: " & inner & "View(addr, owned=False), " & sz & ", _lib.ocheFreeDeep)\n"
       else:
         result &= "    return NativeListView(r, None, " & sz & ", _lib.ocheFreeDeep, '" & toCType(inner) & "')\n"
     else:
-      # ── COPY MODE ─────────────────────────────────────────────────────────
+      # ── COPY MODE: each element copied into a Python-owned XxxView ────────
       if isStruct:
-        result &= "    out = [_struct_copy('" & inner & "', r, 16, " & sz & ", i) for i in range(n)]\n"
+        result &= "    out = [_struct_copy_view('" & inner & "', r, 16, " & sz & ", i) for i in range(n)]\n"
         result &= "    _lib.ocheFreeDeep(r); return out\n"
       else:
         result &= "    data_addr = ctypes.cast(r, ctypes.c_void_p).value + 16\n"
@@ -281,11 +289,18 @@ proc genPInterface*(obj: OcheObject): string =
       result &= "    return SharedListView(r, n, " & sz & ", None, 0, True, '" & toCType(inner) & "')\n"
 
   elif structBanks.hasKey(obj.retType.name):
-    # single-struct return — copy mode (Nim allocated, we copy then free)
+    let sn = obj.retType.name
     result &= "    if r is None: return None\n"
-    result &= "    sz = _struct_size('" & obj.retType.name & "')\n"
-    result &= "    out = _struct_copy('" & obj.retType.name & "', r, 0, sz, 0)\n"
-    result &= "    _lib.ocheFree(r); return out\n"
+    if obj.isView:
+      # view mode — Nim owns the pointer, Python must not free
+      result &= "    return " & sn & "View(r, owned=False)\n"
+    else:
+      # copy mode — memcpy into Python-owned buffer, then free original Nim allocation
+      result &= "    sz = _struct_size('" & sn & "')\n"
+      result &= "    dst = _lib.ocheAllocBytes(ctypes.c_size_t(sz))\n"
+      result &= "    ctypes.memmove(dst, r, sz)\n"
+      result &= "    _lib.ocheFree(r)\n"
+      result &= "    return " & sn & "View(dst, owned=True)\n"
 
   elif enumBanks.hasKey(obj.retType.name):
     result &= "    return r\n"
@@ -326,6 +341,15 @@ proc genPythonPrelude*(): string =
   result &= "def _struct_copy(name: str, ptr, offset: int, elem_size: int, index: int) -> dict:\n"
   result &= "  addr = ctypes.cast(ptr, ctypes.c_void_p).value + offset + index * elem_size\n"
   result &= "  return _struct_from_ctypes(name, _struct_types[name].from_address(addr))\n"
+  result &= "\n"
+  result &= "_struct_view_types: dict = {}\n"
+  result &= "\n"
+  result &= "def _struct_copy_view(name: str, ptr, offset: int, elem_size: int, index: int):\n"
+  result &= "  src = ctypes.cast(ptr, ctypes.c_void_p).value + offset + index * elem_size\n"
+  result &= "  dst = _lib.ocheAllocBytes(ctypes.c_size_t(elem_size))\n"
+  result &= "  ctypes.memmove(dst, src, elem_size)\n"
+  result &= "  view_cls = _struct_view_types.get(name)\n"
+  result &= "  return view_cls(dst, owned=True) if view_cls else None\n"
   result &= "\n"
   result &= "def _struct_from_ctypes(name: str, c) -> dict:\n"
   result &= "  d = {}\n"
@@ -414,6 +438,13 @@ proc genPythonPrelude*(): string =
   result &= "    for i in range(self._n): yield self[i]\n"
   result &= "  def to_list(self) -> list:\n"
   result &= "    return [self[i] for i in range(self._n)]\n"
+  result &= "  def free(self):\n"
+  result &= "    if self._ptr:\n"
+  result &= "      _lib.ocheFreeDeep(self._ptr)\n"
+  result &= "      self._ptr = None\n"
+  result &= "      self._n = 0\n"
+  result &= "  def __enter__(self): return self\n"
+  result &= "  def __exit__(self, *_): self.free()\n"
   result &= "  def to_numpy(self):\n"
   result &= "    if not _HAS_NUMPY or self._unpacker: return None\n"
   result &= "    data_addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16\n"

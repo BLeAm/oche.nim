@@ -33,6 +33,15 @@ def _struct_copy(name: str, ptr, offset: int, elem_size: int, index: int) -> dic
   addr = ctypes.cast(ptr, ctypes.c_void_p).value + offset + index * elem_size
   return _struct_from_ctypes(name, _struct_types[name].from_address(addr))
 
+_struct_view_types: dict = {}
+
+def _struct_copy_view(name: str, ptr, offset: int, elem_size: int, index: int):
+  src = ctypes.cast(ptr, ctypes.c_void_p).value + offset + index * elem_size
+  dst = _lib.ocheAllocBytes(ctypes.c_size_t(elem_size))
+  ctypes.memmove(dst, src, elem_size)
+  view_cls = _struct_view_types.get(name)
+  return view_cls(dst, owned=True) if view_cls else None
+
 def _struct_from_ctypes(name: str, c) -> dict:
   d = {}
   meta = _struct_field_meta.get(name, {})
@@ -120,6 +129,13 @@ class SharedListView:
     for i in range(self._n): yield self[i]
   def to_list(self) -> list:
     return [self[i] for i in range(self._n)]
+  def free(self):
+    if self._ptr:
+      _lib.ocheFreeDeep(self._ptr)
+      self._ptr = None
+      self._n = 0
+  def __enter__(self): return self
+  def __exit__(self, *_): self.free()
   def to_numpy(self):
     if not _HAS_NUMPY or self._unpacker: return None
     data_addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16
@@ -138,6 +154,8 @@ _lib.ocheFreeDeep.restype = None
 _ocheFreeInner = _lib.ocheFreeInner
 _ocheFreeInner.argtypes = [ctypes.c_void_p, ctypes.c_int32]
 _ocheFreeInner.restype = None
+_lib.ocheAllocBytes.argtypes = [ctypes.c_size_t]
+_lib.ocheAllocBytes.restype = ctypes.c_void_p
 _oche_get_error = _lib.ocheGetError
 _oche_get_error.restype = ctypes.c_void_p
 def _check_error():
@@ -161,10 +179,14 @@ _struct_field_meta['Point'] = {
 _OFF_Point_x = Point_t.x.offset
 _OFF_Point_y = Point_t.y.offset
 class PointView:
-  """Zero-copy view into a Point in Nim memory. No dict allocated until .to_dict()."""
-  __slots__ = ('_addr',)
-  def __init__(self, addr: int):
+  __slots__ = ('_addr', '_owned')
+  def __init__(self, addr: int, owned: bool = False):
     self._addr = addr
+    self._owned = owned
+  def __del__(self):
+    if self._owned and self._addr:
+      _lib.ocheFree(ctypes.c_void_p(self._addr))
+      self._addr = 0
   @property
   def x(self) -> float:
     return ctypes.c_double.from_address(self._addr + _OFF_Point_x).value
@@ -178,10 +200,10 @@ class PointView:
   def y(self, v: float):
     ctypes.c_double.from_address(self._addr + _OFF_Point_y).value = v
   def to_dict(self) -> dict:
-    """Materialise to a plain dict (triggers copy — use sparingly)."""
     return _struct_from_ctypes('Point', Point_t.from_address(self._addr))
   def __repr__(self):
     return 'PointView(' + str(self.to_dict()) + ')'
+_struct_view_types['Point'] = PointView
 
 class Tag_t(ctypes.Structure):
   _fields_ = [
@@ -197,10 +219,14 @@ _struct_field_meta['Tag'] = {
 _OFF_Tag_name = Tag_t.name.offset
 _OFF_Tag_id = Tag_t.id.offset
 class TagView:
-  """Zero-copy view into a Tag in Nim memory. No dict allocated until .to_dict()."""
-  __slots__ = ('_addr',)
-  def __init__(self, addr: int):
+  __slots__ = ('_addr', '_owned')
+  def __init__(self, addr: int, owned: bool = False):
     self._addr = addr
+    self._owned = owned
+  def __del__(self):
+    if self._owned and self._addr:
+      _lib.ocheFree(ctypes.c_void_p(self._addr))
+      self._addr = 0
   @property
   def name(self) -> Optional[str]:
     p = ctypes.c_void_p.from_address(self._addr + _OFF_Tag_name).value
@@ -212,10 +238,10 @@ class TagView:
   def id(self, v: int):
     ctypes.c_int64.from_address(self._addr + _OFF_Tag_id).value = v
   def to_dict(self) -> dict:
-    """Materialise to a plain dict (triggers copy — use sparingly)."""
     return _struct_from_ctypes('Tag', Tag_t.from_address(self._addr))
   def __repr__(self):
     return 'TagView(' + str(self.to_dict()) + ')'
+_struct_view_types['Tag'] = TagView
 
 class User_t(ctypes.Structure):
   _fields_ = [
@@ -234,10 +260,14 @@ _OFF_User_username = User_t.username.offset
 _OFF_User_status = User_t.status.offset
 _OFF_User_primaryTag = User_t.primaryTag.offset
 class UserView:
-  """Zero-copy view into a User in Nim memory. No dict allocated until .to_dict()."""
-  __slots__ = ('_addr',)
-  def __init__(self, addr: int):
+  __slots__ = ('_addr', '_owned')
+  def __init__(self, addr: int, owned: bool = False):
     self._addr = addr
+    self._owned = owned
+  def __del__(self):
+    if self._owned and self._addr:
+      _lib.ocheFree(ctypes.c_void_p(self._addr))
+      self._addr = 0
   @property
   def username(self) -> Optional[str]:
     p = ctypes.c_void_p.from_address(self._addr + _OFF_User_username).value
@@ -250,12 +280,12 @@ class UserView:
     ctypes.c_int32.from_address(self._addr + _OFF_User_status).value = int(v)
   @property
   def primaryTag(self) -> 'TagView':
-    return TagView(self._addr + _OFF_User_primaryTag)
+    return TagView(self._addr + _OFF_User_primaryTag, owned=False)
   def to_dict(self) -> dict:
-    """Materialise to a plain dict (triggers copy — use sparingly)."""
     return _struct_from_ctypes('User', User_t.from_address(self._addr))
   def __repr__(self):
     return 'UserView(' + str(self.to_dict()) + ')'
+_struct_view_types['User'] = UserView
 
 class Status:
   Active = 0
@@ -283,24 +313,26 @@ class Porche:
   _createUserPy = _lib.createUserPy
   _createUserPy.argtypes = [ctypes.c_char_p, ctypes.c_int64]
   _createUserPy.restype = ctypes.c_void_p
-  def createUserPy(self, name: str, tagId: int) -> Any:
+  def createUserPy(self, name: str, tagId: int) -> 'UserView':
     r = self._createUserPy(name.encode('utf-8') if name else None, tagId)
     _check_error()
     if r is None: return None
     sz = _struct_size('User')
-    out = _struct_copy('User', r, 0, sz, 0)
-    _lib.ocheFree(r); return out
+    dst = _lib.ocheAllocBytes(ctypes.c_size_t(sz))
+    ctypes.memmove(dst, r, sz)
+    _lib.ocheFree(r)
+    return UserView(dst, owned=True)
 
   _getPointsCopyPy = _lib.getPointsCopyPy
   _getPointsCopyPy.argtypes = [ctypes.c_int64]
   _getPointsCopyPy.restype = ctypes.c_void_p
-  def getPointsCopyPy(self, n: int) -> List[Any]:
+  def getPointsCopyPy(self, n: int) -> List['PointView']:
     r = self._getPointsCopyPy(n)
     _check_error()
     if r is None: return []
     n = ctypes.cast(r, ctypes.POINTER(ctypes.c_int64)).contents.value
     if n <= 0: _lib.ocheFreeDeep(r); return []
-    out = [_struct_copy('Point', r, 16, _struct_size('Point'), i) for i in range(n)]
+    out = [_struct_copy_view('Point', r, 16, _struct_size('Point'), i) for i in range(n)]
     _lib.ocheFreeDeep(r); return out
 
   _maybePoint = _lib.maybePoint

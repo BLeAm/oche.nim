@@ -91,8 +91,9 @@ proc processOche(body: NimNode, isView: bool, backend: static Backend = bDart): 
       return newTree(nnkTypeDef, nameNode, newEmptyNode(), newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), newRec))
 
   let obj = parseOche(body, isView)
-  if backend == bDart:   ooBanks.add(obj)
-  else: ooBanksPython.add(obj)
+  if backend == bDart:     ooBanks.add(obj)
+  elif backend == bPython: ooBanksPython.add(obj)
+  else:                    ooBanks.add(obj); ooBanksPython.add(obj)
   let procName = body[0]; let originalBody = body[6]; var originalRetType = body[3][0]
   if originalRetType.kind == nnkEmpty: originalRetType = ident"void"
 
@@ -165,17 +166,79 @@ proc processOche(body: NimNode, isView: bool, backend: static Backend = bDart): 
 
   result = newTree(nnkProcDef, procName, newEmptyNode(), newEmptyNode(), ffiParams, newTree(nnkPragma, ident("exportc"), ident("dynlib")), newEmptyNode(), wrappedBody)
 
-macro oche*(body: untyped): untyped = processOche(body, false, bDart)
+# Check if a pragma list node contains a given pragma name
+proc hasPragma(pragmas: NimNode, name: string): bool {.compileTime.} =
+  if pragmas.kind != nnkPragma: return false
+  for p in pragmas:
+    if p.kind == nnkIdent and p.strVal == name: return true
+    if p.kind == nnkExprColonExpr and p[0].strVal == name: return true
+  false
+
+# Extract view flag from a pragma node (e.g. {.oche: view.} or {.porche: view.})
+proc pragmaIsView(pragmas: NimNode, name: string): bool {.compileTime.} =
+  if pragmas.kind != nnkPragma: return false
+  for p in pragmas:
+    if p.kind == nnkExprColonExpr and p[0].strVal == name:
+      if p[1].kind == nnkIdent and p[1].strVal == "view": return true
+  false
+
+macro oche*(body: untyped): untyped =
+  # When used as {.oche, porche.} the pragma node on the proc is still intact
+  # at this point — we can peek at it before replacing the proc node.
+  var alsoPorche = false
+  var porcheView = false
+  if body.kind == nnkProcDef:
+    let pragmas = body[4]   # pragma list is index 4 on a ProcDef
+    alsoPorche = hasPragma(pragmas, "porche")
+    porcheView = pragmaIsView(pragmas, "porche")
+  if alsoPorche:
+    let obj = parseOche(body, porcheView)
+    ooBanksPython.add(obj)
+  processOche(body, false, bDart)
+
 macro oche*(arg: untyped, body: untyped): untyped =
   var isView = false
   if arg.kind == nnkIdent and arg.strVal == "view": isView = true
+  var alsoPorche = false
+  var porcheView = false
+  if body.kind == nnkProcDef:
+    let pragmas = body[4]
+    alsoPorche = hasPragma(pragmas, "porche")
+    porcheView = pragmaIsView(pragmas, "porche")
+  if alsoPorche:
+    let obj = parseOche(body, porcheView)
+    ooBanksPython.add(obj)
   processOche(body, isView, bDart)
 
-macro porche*(body: untyped): untyped = processOche(body, false, bPython)
+macro porche*(body: untyped): untyped =
+  if body.kind == nnkProcDef:
+    if hasPragma(body[4], "oche"):
+      ooBanks.add(parseOche(body, pragmaIsView(body[4], "oche")))
+  processOche(body, false, bPython)
+
 macro porche*(arg: untyped, body: untyped): untyped =
   var isView = false
   if arg.kind == nnkIdent and arg.strVal == "view": isView = true
+  if body.kind == nnkProcDef:
+    if hasPragma(body[4], "oche"):
+      ooBanks.add(parseOche(body, pragmaIsView(body[4], "oche")))
   processOche(body, isView, bPython)
+
+## {.ocheAll.} / {.ocheAll: view.}
+## Registers the proc in BOTH Dart and Python banks in one pragma.
+## Use instead of {.oche, porche.} which silently drops porche due to
+## macro expansion order replacing the proc node before porche runs.
+macro ocheAll*(body: untyped): untyped =
+  ooBanks.add(parseOche(body, false))
+  ooBanksPython.add(parseOche(body, false))
+  processOche(body, false, bDart)   # bDart generates the actual exportc proc
+
+macro ocheAll*(arg: untyped, body: untyped): untyped =
+  var isView = false
+  if arg.kind == nnkIdent and arg.strVal == "view": isView = true
+  ooBanks.add(parseOche(body, isView))
+  ooBanksPython.add(parseOche(body, isView))
+  processOche(body, isView, bDart)
 
 macro generate*(output: static string): untyped =
   
@@ -330,6 +393,8 @@ macro generatePython*(output: static string): untyped =
   code &= "_ocheFreeInner = _lib.ocheFreeInner\n"
   code &= "_ocheFreeInner.argtypes = [ctypes.c_void_p, ctypes.c_int32]\n"
   code &= "_ocheFreeInner.restype = None\n"
+  code &= "_lib.ocheAllocBytes.argtypes = [ctypes.c_size_t]\n"
+  code &= "_lib.ocheAllocBytes.restype = ctypes.c_void_p\n"
   code &= "_oche_get_error = _lib.ocheGetError\n"
   code &= "_oche_get_error.restype = ctypes.c_void_p\n"
   code &= "def _check_error():\n"
@@ -341,6 +406,8 @@ macro generatePython*(output: static string): untyped =
   for s in structBanks.values: code &= genPStruct(s)
   for e in enumBanks.values: code &= genPEnum(e)
   code &= "class Porche:\n"
+  if ooBanksPython.len == 0:
+    code &= "  pass\n"
   for o in ooBanksPython:
     code &= genPInterface(o)
   code &= "\nporche = Porche()\n"
@@ -348,6 +415,7 @@ macro generatePython*(output: static string): untyped =
   result = newEmptyNode()
 
   var free = "proc ocheFree(p: pointer) {.exportc, dynlib.} = (if not p.isNil: dealloc(p))\n"
+  free &= "proc ocheAllocBytes(n: csize_t): pointer {.exportc, dynlib.} = alloc0(n)\n"
 
   for s in structBanks.values:
     free &= "proc ocheFreeInner" & s.name & "(o: ptr " & s.name & ") = \n"
