@@ -13,6 +13,7 @@ except ImportError:
 
 _struct_size_cache = {}
 _struct_types = {}
+_struct_field_meta = {}
 def _struct_size(name):
   return _struct_size_cache.get(name, 8)
 
@@ -32,8 +33,20 @@ def _unpack_struct(name, ptr, offset, elem_size, index):
 
 def _struct_from_ctypes(name, c):
   d = {}
+  meta = _struct_field_meta.get(name, {})
   for (fname, _) in c._fields_:
-    d[fname] = getattr(c, fname)
+    raw = getattr(c, fname)
+    kind, extra = meta.get(fname, ('pod', None))
+    if kind == 'string':
+      if raw is None or raw == 0:
+        d[fname] = None
+      else:
+        d[fname] = ctypes.string_at(raw).decode('utf-8')
+    elif kind == 'struct':
+      # nested struct is inline (embedded), raw is already the ctypes struct object
+      d[fname] = _struct_from_ctypes(extra, raw)
+    else:
+      d[fname] = raw
   return d
 
 class _SharedView:
@@ -117,6 +130,10 @@ class Point_t(ctypes.Structure):
   ]
 _struct_size_cache['Point'] = ctypes.sizeof(Point_t)
 _struct_types['Point'] = Point_t
+_struct_field_meta['Point'] = {
+  'x': ('pod', None),
+  'y': ('pod', None),
+}
 
 class Tag_t(ctypes.Structure):
   _fields_ = [
@@ -125,15 +142,24 @@ class Tag_t(ctypes.Structure):
   ]
 _struct_size_cache['Tag'] = ctypes.sizeof(Tag_t)
 _struct_types['Tag'] = Tag_t
+_struct_field_meta['Tag'] = {
+  'name': ('string', None),
+  'id': ('pod', None),
+}
 
 class User_t(ctypes.Structure):
   _fields_ = [
     ('username', ctypes.c_void_p),
     ('status', ctypes.c_int32),
-    ('primaryTag', ctypes.c_void_p),
+    ('primaryTag', Tag_t),
   ]
 _struct_size_cache['User'] = ctypes.sizeof(User_t)
 _struct_types['User'] = User_t
+_struct_field_meta['User'] = {
+  'username': ('string', None),
+  'status': ('pod', None),
+  'primaryTag': ('struct', 'Tag'),
+}
 
 class Status:
   Active = 0

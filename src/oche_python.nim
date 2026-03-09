@@ -55,11 +55,21 @@ proc genPStruct*(s: OcheStruct): string =
     let cT = toCType(f.typ.name)
     let cTFull = "ctypes." & cT
     if f.typ.name in ["string", "cstring"]: result &= "    ('" & f.name & "', ctypes.c_void_p),\n"
-    elif structBanks.hasKey(f.typ.name): result &= "    ('" & f.name & "', ctypes.c_void_p),\n"
+    elif structBanks.hasKey(f.typ.name): result &= "    ('" & f.name & "', " & f.typ.name & "_t),\n"
     else: result &= "    ('" & f.name & "', " & cTFull & "),\n"
   result &= "  ]\n"
   result &= "_struct_size_cache['" & s.name & "'] = ctypes.sizeof(" & s.name & "_t)\n"
-  result &= "_struct_types['" & s.name & "'] = " & s.name & "_t\n\n"
+  result &= "_struct_types['" & s.name & "'] = " & s.name & "_t\n"
+  # Emit field metadata so _struct_from_ctypes knows how to decode each field
+  result &= "_struct_field_meta['" & s.name & "'] = {\n"
+  for f in s.fields:
+    if f.typ.name in ["string", "cstring"]:
+      result &= "  '" & f.name & "': ('string', None),\n"
+    elif structBanks.hasKey(f.typ.name):
+      result &= "  '" & f.name & "': ('struct', '" & f.typ.name & "'),\n"
+    else:
+      result &= "  '" & f.name & "': ('pod', None),\n"
+  result &= "}\n\n"
 
 proc genPEnum*(e: OcheEnum): string =
   result = "class " & e.name & ":\n"
@@ -180,6 +190,7 @@ except ImportError:
 
 _struct_size_cache = {}
 _struct_types = {}
+_struct_field_meta = {}
 def _struct_size(name):
   return _struct_size_cache.get(name, 8)
 
@@ -199,8 +210,20 @@ def _unpack_struct(name, ptr, offset, elem_size, index):
 
 def _struct_from_ctypes(name, c):
   d = {}
+  meta = _struct_field_meta.get(name, {})
   for (fname, _) in c._fields_:
-    d[fname] = getattr(c, fname)
+    raw = getattr(c, fname)
+    kind, extra = meta.get(fname, ('pod', None))
+    if kind == 'string':
+      if raw is None or raw == 0:
+        d[fname] = None
+      else:
+        d[fname] = ctypes.string_at(raw).decode('utf-8')
+    elif kind == 'struct':
+      # nested struct is inline (embedded), raw is already the ctypes struct object
+      d[fname] = _struct_from_ctypes(extra, raw)
+    else:
+      d[fname] = raw
   return d
 
 class _SharedView:
