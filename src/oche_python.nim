@@ -57,7 +57,10 @@ proc toPythonReturnType*(obj: OcheObject): string =
   return toPythonType(obj.retType.name)
 
 proc elemSizeAndDtype(inner: string): (string, string) =
-  if structBanks.hasKey(inner): return ("_struct_size('" & inner & "')", "None")
+  if structBanks.hasKey(inner):
+    let s = structBanks[inner]
+    if s.isPOD: return ("_struct_size('" & inner & "')", "_NUMPY_DTYPE_" & inner)
+    else: return ("_struct_size('" & inner & "')", "None")
   case inner
   of "int", "int64": return ("ctypes.sizeof(ctypes.c_int64)", "'i8'")
   of "float", "float64": return ("ctypes.sizeof(ctypes.c_double)", "'f8'")
@@ -67,6 +70,18 @@ proc elemSizeAndDtype(inner: string): (string, string) =
   else:
     if enumBanks.hasKey(inner): return ("ctypes.sizeof(ctypes.c_int32)", "'i4'")
     return ("1", "'u1'")
+
+proc toNumpyDtypeChar*(t: string): string =
+  ## Map a primitive Nim type to numpy dtype char string
+  case t
+  of "int", "int64":    return "'i8'"
+  of "float", "float64": return "'f8'"
+  of "float32":          return "'f4'"
+  of "uint8":            return "'u1'"
+  of "bool":             return "'?'"
+  else:
+    if enumBanks.hasKey(t): return "'i4'"
+    return ""  # non-primitive — not numpy compatible
 
 # ---------------------------------------------------------------------------
 # genPStruct
@@ -156,6 +171,17 @@ proc genPStruct*(s: OcheStruct): string =
   result &= "  def __repr__(self):\n"
   result &= "    return '" & s.name & "View(' + str(self.to_dict()) + ')'\n"
   result &= "_struct_view_types['" & s.name & "'] = " & s.name & "View\n"
+
+  # ── 5. numpy structured dtype (POD structs only) ──────────────────────────
+  if s.isPOD:
+    result &= "_NUMPY_DTYPE_" & s.name & " = np.dtype([\n"
+    for f in s.fields:
+      let dc = toNumpyDtypeChar(f.typ.name)
+      if dc != "":
+        result &= "  ('" & f.name & "', " & dc & "),\n"
+    result &= "]) if _HAS_NUMPY else None\n"
+  else:
+    result &= "_NUMPY_DTYPE_" & s.name & " = None  # not POD (has strings/pointers)\n"
   result &= "\n"
 
 # ---------------------------------------------------------------------------
@@ -240,7 +266,9 @@ proc genPInterface*(obj: OcheObject): string =
     if obj.isView:
       # ── VIEW MODE: NativeListView of XxxView(owned=False) ─────────────────
       if isStruct:
-        result &= "    return NativeListView(r, lambda addr: " & inner & "View(addr, owned=False), " & sz & ", _lib.ocheFreeDeep)\n"
+        let isPOD = structBanks[inner].isPOD
+        let ndt = if isPOD: "_NUMPY_DTYPE_" & inner else: "None"
+        result &= "    return NativeListView(r, lambda addr: " & inner & "View(addr, owned=False), " & sz & ", _lib.ocheFreeDeep, numpy_dtype=" & ndt & ")\n"
       else:
         result &= "    return NativeListView(r, None, " & sz & ", _lib.ocheFreeDeep, '" & toCType(inner) & "')\n"
     else:
@@ -281,26 +309,31 @@ proc genPInterface*(obj: OcheObject): string =
     result &= "    if n <= 0: return []\n"
     if isStruct:
       let s = structBanks[inner]
+      let ndt = if s.isPOD: "_NUMPY_DTYPE_" & inner else: "None"
       result &= "    return SharedListView(r, n, " & sz &
                 ", lambda addr: " & inner & "View(addr)" &
                 ", " & $s.typeId &
-                ", " & (if s.isPOD: "True" else: "False") & ")\n"
+                ", " & (if s.isPOD: "True" else: "False") &
+                ", numpy_dtype=" & ndt & ")\n"
     else:
       result &= "    return SharedListView(r, n, " & sz & ", None, 0, True, '" & toCType(inner) & "')\n"
 
   elif structBanks.hasKey(obj.retType.name):
     let sn = obj.retType.name
-    result &= "    if r is None: return None\n"
     if obj.isView:
-      # view mode — Nim owns the pointer, Python must not free
-      result &= "    return " & sn & "View(r, owned=False)\n"
-    else:
-      # copy mode — memcpy into Python-owned buffer, then free original Nim allocation
-      result &= "    sz = _struct_size('" & sn & "')\n"
-      result &= "    dst = _lib.ocheAllocBytes(ctypes.c_size_t(sz))\n"
-      result &= "    ctypes.memmove(dst, r, sz)\n"
-      result &= "    _lib.ocheFree(r)\n"
-      result &= "    return " & sn & "View(dst, owned=True)\n"
+      # view mode on single struct return is unsafe — the struct lives on the Nim
+      # stack and is gone immediately after the proc returns, leaving a dangling
+      # pointer. Fallback to copy mode. The compile-time warning is emitted by
+      # genPInterface's caller (generatePython macro) via parseStmt.
+      result &= "    # WARNING: {.porche:view.} ignored for single-struct return '" &
+                obj.name & "' — copy mode used instead (stack safety)\n"
+    result &= "    if r is None: return None\n"
+    # always copy mode for single struct — memcpy into Python-owned buffer
+    result &= "    sz = _struct_size('" & sn & "')\n"
+    result &= "    dst = _lib.ocheAllocBytes(ctypes.c_size_t(sz))\n"
+    result &= "    ctypes.memmove(dst, r, sz)\n"
+    result &= "    _lib.ocheFree(r)\n"
+    result &= "    return " & sn & "View(dst, owned=True)\n"
 
   elif enumBanks.hasKey(obj.retType.name):
     result &= "    return r\n"
@@ -334,8 +367,22 @@ proc genPythonPrelude*(): string =
   result &= "  t = _struct_types[name]\n"
   result &= "  if hasattr(obj, '_as_buffer'): return obj\n"
   result &= "  buf = t()\n"
+  result &= "  meta = _struct_field_meta.get(name, {})\n"
   result &= "  for (k, v) in (obj.items() if hasattr(obj, 'items') else obj):\n"
-  result &= "    setattr(buf, k, v)\n"
+  result &= "    kind, extra = meta.get(k, ('pod', None))\n"
+  result &= "    if kind == 'struct':\n"
+  result &= "      if v is None:\n"
+  result &= "        pass  # leave zeroed\n"
+  result &= "      elif hasattr(v, '_addr'):\n"
+  result &= "        # XxxView — memcpy into the nested field slot\n"
+  result &= "        sub_t = _struct_types[extra]\n"
+  result &= "        ctypes.memmove(ctypes.addressof(getattr(buf, k)), v._addr, ctypes.sizeof(sub_t))\n"
+  result &= "      elif isinstance(v, dict):\n"
+  result &= "        setattr(buf, k, _pack_struct(extra, v))\n"
+  result &= "      else:\n"
+  result &= "        setattr(buf, k, v)  # already a ctypes struct instance\n"
+  result &= "    else:\n"
+  result &= "      setattr(buf, k, v)\n"
   result &= "  return buf\n"
   result &= "\n"
   result &= "def _struct_copy(name: str, ptr, offset: int, elem_size: int, index: int) -> dict:\n"
@@ -368,14 +415,15 @@ proc genPythonPrelude*(): string =
   result &= "# -- NativeListView (view mode: zero-copy, read-only) --\n"
   result &= "\n"
   result &= "class NativeListView:\n"
-  result &= "  __slots__ = ('_ptr', '_n', '_elem_size', '_unpacker', '_free_fn', '_elem_ctype')\n"
-  result &= "  def __init__(self, ptr, unpacker, elem_size: int, free_fn, elem_ctype=None):\n"
+  result &= "  __slots__ = ('_ptr', '_n', '_elem_size', '_unpacker', '_free_fn', '_elem_ctype', '_numpy_dtype')\n"
+  result &= "  def __init__(self, ptr, unpacker, elem_size: int, free_fn, elem_ctype=None, numpy_dtype=None):\n"
   result &= "    self._ptr = ptr\n"
   result &= "    self._n = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_int64)).contents.value if ptr else 0\n"
   result &= "    self._elem_size = elem_size\n"
   result &= "    self._unpacker = unpacker\n"
   result &= "    self._free_fn = free_fn\n"
   result &= "    self._elem_ctype = getattr(ctypes, elem_ctype) if isinstance(elem_ctype, str) else elem_ctype\n"
+  result &= "    self._numpy_dtype = numpy_dtype\n"
   result &= "  def __len__(self): return self._n\n"
   result &= "  def __getitem__(self, i):\n"
   result &= "    if i < 0 or i >= self._n: raise IndexError('index out of range')\n"
@@ -391,19 +439,22 @@ proc genPythonPrelude*(): string =
   result &= "  def to_list(self) -> list:\n"
   result &= "    return [self[i] for i in range(self._n)]\n"
   result &= "  def to_numpy(self):\n"
-  result &= "    if not _HAS_NUMPY or self._unpacker: return None\n"
+  result &= "    if not _HAS_NUMPY: return None\n"
   result &= "    data_addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16\n"
-  result &= "    dt = np.dtype(self._elem_ctype)\n"
-  result &= "    return np.frombuffer(\n"
-  result &= "      (ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr),\n"
-  result &= "      dtype=dt, count=self._n).copy()\n"
+  result &= "    raw = (ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr)\n"
+  result &= "    if self._numpy_dtype is not None:\n"
+  result &= "      # POD struct — read-only copy (Nim may free the buffer anytime)\n"
+  result &= "      return np.frombuffer(raw, dtype=self._numpy_dtype, count=self._n).copy()\n"
+  result &= "    elif self._elem_ctype is not None:\n"
+  result &= "      return np.frombuffer(raw, dtype=np.dtype(self._elem_ctype), count=self._n).copy()\n"
+  result &= "    return None\n"
   result &= "\n"
   result &= "# -- SharedListView (share mode: zero-copy, read-write) --\n"
   result &= "\n"
   result &= "class SharedListView:\n"
-  result &= "  __slots__ = ('_ptr', '_n', '_elem_size', '_unpacker', '_type_id', '_is_pod', '_elem_ctype')\n"
+  result &= "  __slots__ = ('_ptr', '_n', '_elem_size', '_unpacker', '_type_id', '_is_pod', '_elem_ctype', '_numpy_dtype')\n"
   result &= "  def __init__(self, ptr, n: int, elem_size: int, unpacker, type_id: int = 0,\n"
-  result &= "               is_pod: bool = True, elem_ctype=None):\n"
+  result &= "               is_pod: bool = True, elem_ctype=None, numpy_dtype=None):\n"
   result &= "    self._ptr = ptr\n"
   result &= "    self._n = n\n"
   result &= "    self._elem_size = elem_size\n"
@@ -411,6 +462,7 @@ proc genPythonPrelude*(): string =
   result &= "    self._type_id = type_id\n"
   result &= "    self._is_pod = is_pod\n"
   result &= "    self._elem_ctype = getattr(ctypes, elem_ctype) if isinstance(elem_ctype, str) else elem_ctype\n"
+  result &= "    self._numpy_dtype = numpy_dtype\n"
   result &= "  def __len__(self): return self._n\n"
   result &= "  def __getitem__(self, i):\n"
   result &= "    if i < 0 or i >= self._n: raise IndexError('index out of range')\n"
@@ -446,10 +498,14 @@ proc genPythonPrelude*(): string =
   result &= "  def __enter__(self): return self\n"
   result &= "  def __exit__(self, *_): self.free()\n"
   result &= "  def to_numpy(self):\n"
-  result &= "    if not _HAS_NUMPY or self._unpacker: return None\n"
+  result &= "    if not _HAS_NUMPY: return None\n"
   result &= "    data_addr = ctypes.cast(self._ptr, ctypes.c_void_p).value + 16\n"
-  result &= "    dt = np.dtype(self._elem_ctype)\n"
-  result &= "    return np.frombuffer(\n"
-  result &= "      (ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr),\n"
-  result &= "      dtype=dt, count=self._n)\n"
+  result &= "    raw = (ctypes.c_char * (self._n * self._elem_size)).from_address(data_addr)\n"
+  result &= "    if self._numpy_dtype is not None:\n"
+  result &= "      # POD struct — zero-copy writable view directly into Nim RAM\n"
+  result &= "      return np.frombuffer(raw, dtype=self._numpy_dtype, count=self._n)\n"
+  result &= "    elif self._elem_ctype is not None:\n"
+  result &= "      # primitive — zero-copy writable view directly into Nim RAM\n"
+  result &= "      return np.frombuffer(raw, dtype=np.dtype(self._elem_ctype), count=self._n)\n"
+  result &= "    return None\n"
   result &= "\n"

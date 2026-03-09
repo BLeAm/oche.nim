@@ -412,7 +412,17 @@ macro generatePython*(output: static string): untyped =
     code &= genPInterface(o)
   code &= "\nporche = Porche()\n"
   writeFile(output, code)
-  result = newEmptyNode()
+
+  # Emit compile-time warnings for procs that used {.porche:view.} on a
+  # single-struct return — these are silently downgraded to copy mode.
+  result = newStmtList()
+  for o in ooBanksPython:
+    if o.isView and structBanks.hasKey(o.retType.name):
+      let msg = "[Porche] '" & o.name &
+                "' returns single struct with {.porche:view.} — " &
+                "view mode is unsafe for stack-allocated returns. " &
+                "Downgraded to copy mode automatically."
+      result.add parseStmt("{.warning: \"" & msg & "\".}")
 
   var free = "proc ocheFree(p: pointer) {.exportc, dynlib.} = (if not p.isNil: dealloc(p))\n"
   free &= "proc ocheAllocBytes(n: csize_t): pointer {.exportc, dynlib.} = alloc0(n)\n"
