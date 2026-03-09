@@ -167,7 +167,7 @@ class SharedListView:
       return np.frombuffer(raw, dtype=np.dtype(self._elem_ctype), count=self._n)
     return None
 
-_lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libbench_full.so')
+_lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libbench_suite.so')
 _lib = ctypes.CDLL(_lib_path)
 
 _lib.ocheFree.argtypes = [ctypes.c_void_p]
@@ -188,160 +188,20 @@ def _check_error():
         _lib.ocheFree(p)
         raise RuntimeError('NimError: ' + msg)
 
-class Body_t(ctypes.Structure):
-  _fields_ = [
-    ('x', ctypes.c_double),
-    ('y', ctypes.c_double),
-    ('z', ctypes.c_double),
-    ('vx', ctypes.c_double),
-    ('vy', ctypes.c_double),
-    ('vz', ctypes.c_double),
-    ('mass', ctypes.c_double),
-  ]
-_struct_size_cache['Body'] = ctypes.sizeof(Body_t)
-_struct_types['Body'] = Body_t
-_struct_field_meta['Body'] = {
-  'x': ('pod', None),
-  'y': ('pod', None),
-  'z': ('pod', None),
-  'vx': ('pod', None),
-  'vy': ('pod', None),
-  'vz': ('pod', None),
-  'mass': ('pod', None),
-}
-_OFF_Body_x = Body_t.x.offset
-_OFF_Body_y = Body_t.y.offset
-_OFF_Body_z = Body_t.z.offset
-_OFF_Body_vx = Body_t.vx.offset
-_OFF_Body_vy = Body_t.vy.offset
-_OFF_Body_vz = Body_t.vz.offset
-_OFF_Body_mass = Body_t.mass.offset
-class BodyView:
-  __slots__ = ('_addr', '_owned')
-  def __init__(self, addr: int, owned: bool = False):
-    self._addr = addr
-    self._owned = owned
-  def __del__(self):
-    if self._owned and self._addr:
-      _lib.ocheFree(ctypes.c_void_p(self._addr))
-      self._addr = 0
-  @property
-  def x(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Body_x).value
-  @x.setter
-  def x(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Body_x).value = v
-  @property
-  def y(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Body_y).value
-  @y.setter
-  def y(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Body_y).value = v
-  @property
-  def z(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Body_z).value
-  @z.setter
-  def z(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Body_z).value = v
-  @property
-  def vx(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Body_vx).value
-  @vx.setter
-  def vx(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Body_vx).value = v
-  @property
-  def vy(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Body_vy).value
-  @vy.setter
-  def vy(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Body_vy).value = v
-  @property
-  def vz(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Body_vz).value
-  @vz.setter
-  def vz(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Body_vz).value = v
-  @property
-  def mass(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Body_mass).value
-  @mass.setter
-  def mass(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Body_mass).value = v
-  def to_dict(self) -> dict:
-    return _struct_from_ctypes('Body', Body_t.from_address(self._addr))
-  def __repr__(self):
-    return 'BodyView(' + str(self.to_dict()) + ')'
-_struct_view_types['Body'] = BodyView
-_NUMPY_DTYPE_Body = np.dtype([
-  ('x', 'f8'),
-  ('y', 'f8'),
-  ('z', 'f8'),
-  ('vx', 'f8'),
-  ('vy', 'f8'),
-  ('vz', 'f8'),
-  ('mass', 'f8'),
-]) if _HAS_NUMPY else None
-
-class Vec3_t(ctypes.Structure):
-  _fields_ = [
-    ('x', ctypes.c_double),
-    ('y', ctypes.c_double),
-    ('z', ctypes.c_double),
-  ]
-_struct_size_cache['Vec3'] = ctypes.sizeof(Vec3_t)
-_struct_types['Vec3'] = Vec3_t
-_struct_field_meta['Vec3'] = {
-  'x': ('pod', None),
-  'y': ('pod', None),
-  'z': ('pod', None),
-}
-_OFF_Vec3_x = Vec3_t.x.offset
-_OFF_Vec3_y = Vec3_t.y.offset
-_OFF_Vec3_z = Vec3_t.z.offset
-class Vec3View:
-  __slots__ = ('_addr', '_owned')
-  def __init__(self, addr: int, owned: bool = False):
-    self._addr = addr
-    self._owned = owned
-  def __del__(self):
-    if self._owned and self._addr:
-      _lib.ocheFree(ctypes.c_void_p(self._addr))
-      self._addr = 0
-  @property
-  def x(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Vec3_x).value
-  @x.setter
-  def x(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Vec3_x).value = v
-  @property
-  def y(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Vec3_y).value
-  @y.setter
-  def y(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Vec3_y).value = v
-  @property
-  def z(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Vec3_z).value
-  @z.setter
-  def z(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Vec3_z).value = v
-  def to_dict(self) -> dict:
-    return _struct_from_ctypes('Vec3', Vec3_t.from_address(self._addr))
-  def __repr__(self):
-    return 'Vec3View(' + str(self.to_dict()) + ')'
-_struct_view_types['Vec3'] = Vec3View
-_NUMPY_DTYPE_Vec3 = np.dtype([
-  ('x', 'f8'),
-  ('y', 'f8'),
-  ('z', 'f8'),
-]) if _HAS_NUMPY else None
-
 class Porche:
   _nbodyNim = _lib.nbodyNim
   _nbodyNim.argtypes = [ctypes.c_int64]
   _nbodyNim.restype = ctypes.c_double
   def nbodyNim(self, n: int) -> float:
     r = self._nbodyNim(n)
+    _check_error()
+    return r
+
+  _fannkuchNim = _lib.fannkuchNim
+  _fannkuchNim.argtypes = [ctypes.c_int64]
+  _fannkuchNim.restype = ctypes.c_int64
+  def fannkuchNim(self, n: int) -> int:
+    r = self._fannkuchNim(n)
     _check_error()
     return r
 
@@ -353,16 +213,21 @@ class Porche:
     _check_error()
     return r
 
-  _generateLargeArrayView = _lib.generateLargeArrayView
-  _generateLargeArrayView.argtypes = [ctypes.c_int64]
-  _generateLargeArrayView.restype = ctypes.c_void_p
-  def generateLargeArrayView(self, n: int) -> 'SharedListView':
-    r = self._generateLargeArrayView(n)
+  _binaryTreesNim = _lib.binaryTreesNim
+  _binaryTreesNim.argtypes = [ctypes.c_int64]
+  _binaryTreesNim.restype = ctypes.c_int64
+  def binaryTreesNim(self, depth: int) -> int:
+    r = self._binaryTreesNim(depth)
     _check_error()
-    if r is None: return []
-    n = ctypes.cast(r, ctypes.POINTER(ctypes.c_int64)).contents.value
-    if n <= 0: return []
-    return SharedListView(r, n, _struct_size('Vec3'), lambda addr: Vec3View(addr), 2, True, numpy_dtype=_NUMPY_DTYPE_Vec3)
+    return r
+
+  _mandelbrotNim = _lib.mandelbrotNim
+  _mandelbrotNim.argtypes = [ctypes.c_int64]
+  _mandelbrotNim.restype = ctypes.c_int64
+  def mandelbrotNim(self, n: int) -> int:
+    r = self._mandelbrotNim(n)
+    _check_error()
+    return r
 
 
 porche = Porche()

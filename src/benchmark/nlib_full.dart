@@ -6,23 +6,155 @@ import 'dart:io' show Platform;
 import 'dart:collection';
 import 'package:ffi/ffi.dart';
 
-final String _libName = Platform.isWindows ? 'libbench_suite.dll' : (Platform.isMacOS ? 'libbench_suite.dylib' : 'libbench_suite.so');
+final String _libName = Platform.isWindows ? 'libbench_full.dll' : (Platform.isMacOS ? 'libbench_full.dylib' : 'libbench_full.so');
 final dynlib = ffi.DynamicLibrary.open('./$_libName');
 final _ocheFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFree');
 final _ocheFreeDeep = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFreeDeep');
 final _ocheFreeInner = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer, ffi.Int32), void Function(ffi.Pointer, int)>('ocheFreeInner');
 final _ocheGetError = dynlib.lookupFunction<ffi.Pointer<Utf8> Function(), ffi.Pointer<Utf8> Function()>('ocheGetError');
 void _checkError() { final ptr = _ocheGetError(); if (ptr.address != 0) { final msg = ptr.toDartString(); _ocheFree(ptr); throw Exception('NimError: $msg'); } }
+final class NBody extends ffi.Struct {
+  @ffi.Double() external double x;
+  @ffi.Double() external double y;
+  @ffi.Double() external double z;
+  @ffi.Double() external double vx;
+  @ffi.Double() external double vy;
+  @ffi.Double() external double vz;
+  @ffi.Double() external double mass;
+}
+
+extension type BodyView(NBody _ref) {
+  double get x => _ref.x;
+  set x(double v) => _ref.x = v;
+  double get y => _ref.y;
+  set y(double v) => _ref.y = v;
+  double get z => _ref.z;
+  set z(double v) => _ref.z = v;
+  double get vx => _ref.vx;
+  set vx(double v) => _ref.vx = v;
+  double get vy => _ref.vy;
+  set vy(double v) => _ref.vy = v;
+  double get vz => _ref.vz;
+  set vz(double v) => _ref.vz = v;
+  double get mass => _ref.mass;
+  set mass(double v) => _ref.mass = v;
+  void _packInto(ffi.Pointer<NBody> p) {
+    p.ref.x = _ref.x;
+    p.ref.y = _ref.y;
+    p.ref.z = _ref.z;
+    p.ref.vx = _ref.vx;
+    p.ref.vy = _ref.vy;
+    p.ref.vz = _ref.vz;
+    p.ref.mass = _ref.mass;
+  }
+}
+
+class Body {
+  final double x;
+  final double y;
+  final double z;
+  final double vx;
+  final double vy;
+  final double vz;
+  final double mass;
+  const Body({
+    required this.x,
+    required this.y,
+    required this.z,
+    required this.vx,
+    required this.vy,
+    required this.vz,
+    required this.mass
+  });
+
+  void _pack(NBody target, ffi.Allocator alloc) {
+    target.x = x;
+    target.y = y;
+    target.z = z;
+    target.vx = vx;
+    target.vy = vy;
+    target.vz = vz;
+    target.mass = mass;
+  }
+
+  void _packManual(NBody target) {
+    target.x = x;
+    target.y = y;
+    target.z = z;
+    target.vx = vx;
+    target.vy = vy;
+    target.vz = vz;
+    target.mass = mass;
+  }
+
+  static Body _unpack(NBody source) {
+    return Body(
+    x: source.x,
+    y: source.y,
+    z: source.z,
+    vx: source.vx,
+    vy: source.vy,
+    vz: source.vz,
+    mass: source.mass,
+    );
+  }
+}
+final class NVec3 extends ffi.Struct {
+  @ffi.Double() external double x;
+  @ffi.Double() external double y;
+  @ffi.Double() external double z;
+}
+
+extension type Vec3View(NVec3 _ref) {
+  double get x => _ref.x;
+  set x(double v) => _ref.x = v;
+  double get y => _ref.y;
+  set y(double v) => _ref.y = v;
+  double get z => _ref.z;
+  set z(double v) => _ref.z = v;
+  void _packInto(ffi.Pointer<NVec3> p) {
+    p.ref.x = _ref.x;
+    p.ref.y = _ref.y;
+    p.ref.z = _ref.z;
+  }
+}
+
+class Vec3 {
+  final double x;
+  final double y;
+  final double z;
+  const Vec3({
+    required this.x,
+    required this.y,
+    required this.z
+  });
+
+  void _pack(NVec3 target, ffi.Allocator alloc) {
+    target.x = x;
+    target.y = y;
+    target.z = z;
+  }
+
+  void _packManual(NVec3 target) {
+    target.x = x;
+    target.y = y;
+    target.z = z;
+  }
+
+  static Vec3 _unpack(NVec3 source) {
+    return Vec3(
+    x: source.x,
+    y: source.y,
+    z: source.z,
+    );
+  }
+}
 typedef NnbodyNimN = ffi.Double Function(ffi.Int64);
 typedef NnbodyNimD = double Function(int);
-typedef NfannkuchNimN = ffi.Int64 Function(ffi.Int64);
-typedef NfannkuchNimD = int Function(int);
 typedef NspectralNormNimN = ffi.Double Function(ffi.Int64);
 typedef NspectralNormNimD = double Function(int);
-typedef NbinaryTreesNimN = ffi.Int64 Function(ffi.Int64);
-typedef NbinaryTreesNimD = int Function(int);
-typedef NmandelbrotNimN = ffi.Int64 Function(ffi.Int64);
-typedef NmandelbrotNimD = int Function(int);
+typedef NgenerateLargeArrayViewN = ffi.Pointer<ffi.Void> Function(ffi.Int64);
+typedef NgenerateLargeArrayViewD = ffi.Pointer<ffi.Void> Function(int);
 final _finalizerDeep = Finalizer<ffi.Pointer<ffi.Void>>((ptr) => _ocheFreeDeep(ptr));
 
 abstract class OcheView<T> extends ListBase<T> {
@@ -100,29 +232,17 @@ class Oche {
       final r = nnbodyNimCall(v_n); _checkError();
       return r;
   }
-  late final nfannkuchNimCall = dynlib.lookupFunction<NfannkuchNimN, NfannkuchNimD>('fannkuchNim');
-
-  int fannkuchNim(final int v_n) {
-      final r = nfannkuchNimCall(v_n); _checkError();
-      return r;
-  }
   late final nspectralNormNimCall = dynlib.lookupFunction<NspectralNormNimN, NspectralNormNimD>('spectralNormNim');
 
   double spectralNormNim(final int v_n) {
       final r = nspectralNormNimCall(v_n); _checkError();
       return r;
   }
-  late final nbinaryTreesNimCall = dynlib.lookupFunction<NbinaryTreesNimN, NbinaryTreesNimD>('binaryTreesNim');
+  late final ngenerateLargeArrayViewCall = dynlib.lookupFunction<NgenerateLargeArrayViewN, NgenerateLargeArrayViewD>('generateLargeArrayView');
 
-  int binaryTreesNim(final int v_depth) {
-      final r = nbinaryTreesNimCall(v_depth); _checkError();
-      return r;
-  }
-  late final nmandelbrotNimCall = dynlib.lookupFunction<NmandelbrotNimN, NmandelbrotNimD>('mandelbrotNim');
-
-  int mandelbrotNim(final int v_n) {
-      final r = nmandelbrotNimCall(v_n); _checkError();
-      return r;
+  SharedListView<Vec3View> generateLargeArrayView(final int v_n) {
+      final p = ngenerateLargeArrayViewCall(v_n); _checkError();
+      return SharedListView<Vec3View>(p, (ptr) => Vec3View(ptr.cast<NVec3>().ref), (p, v) { if (v is Vec3) { v._packManual(p.cast<NVec3>().ref); } else if (v is Vec3View) { v._packInto(p.cast<NVec3>()); } }, ffi.sizeOf<NVec3>());
   }
 
 }

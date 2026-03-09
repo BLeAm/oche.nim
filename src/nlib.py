@@ -167,7 +167,7 @@ class SharedListView:
       return np.frombuffer(raw, dtype=np.dtype(self._elem_ctype), count=self._n)
     return None
 
-_lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libbench_full.so')
+_lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmain.so')
 _lib = ctypes.CDLL(_lib_path)
 
 _lib.ocheFree.argtypes = [ctypes.c_void_p]
@@ -188,35 +188,20 @@ def _check_error():
         _lib.ocheFree(p)
         raise RuntimeError('NimError: ' + msg)
 
-class Body_t(ctypes.Structure):
+class Point_t(ctypes.Structure):
   _fields_ = [
     ('x', ctypes.c_double),
     ('y', ctypes.c_double),
-    ('z', ctypes.c_double),
-    ('vx', ctypes.c_double),
-    ('vy', ctypes.c_double),
-    ('vz', ctypes.c_double),
-    ('mass', ctypes.c_double),
   ]
-_struct_size_cache['Body'] = ctypes.sizeof(Body_t)
-_struct_types['Body'] = Body_t
-_struct_field_meta['Body'] = {
+_struct_size_cache['Point'] = ctypes.sizeof(Point_t)
+_struct_types['Point'] = Point_t
+_struct_field_meta['Point'] = {
   'x': ('pod', None),
   'y': ('pod', None),
-  'z': ('pod', None),
-  'vx': ('pod', None),
-  'vy': ('pod', None),
-  'vz': ('pod', None),
-  'mass': ('pod', None),
 }
-_OFF_Body_x = Body_t.x.offset
-_OFF_Body_y = Body_t.y.offset
-_OFF_Body_z = Body_t.z.offset
-_OFF_Body_vx = Body_t.vx.offset
-_OFF_Body_vy = Body_t.vy.offset
-_OFF_Body_vz = Body_t.vz.offset
-_OFF_Body_mass = Body_t.mass.offset
-class BodyView:
+_OFF_Point_x = Point_t.x.offset
+_OFF_Point_y = Point_t.y.offset
+class PointView:
   __slots__ = ('_addr', '_owned')
   def __init__(self, addr: int, owned: bool = False):
     self._addr = addr
@@ -227,78 +212,40 @@ class BodyView:
       self._addr = 0
   @property
   def x(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Body_x).value
+    return ctypes.c_double.from_address(self._addr + _OFF_Point_x).value
   @x.setter
   def x(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Body_x).value = v
+    ctypes.c_double.from_address(self._addr + _OFF_Point_x).value = v
   @property
   def y(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Body_y).value
+    return ctypes.c_double.from_address(self._addr + _OFF_Point_y).value
   @y.setter
   def y(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Body_y).value = v
-  @property
-  def z(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Body_z).value
-  @z.setter
-  def z(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Body_z).value = v
-  @property
-  def vx(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Body_vx).value
-  @vx.setter
-  def vx(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Body_vx).value = v
-  @property
-  def vy(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Body_vy).value
-  @vy.setter
-  def vy(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Body_vy).value = v
-  @property
-  def vz(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Body_vz).value
-  @vz.setter
-  def vz(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Body_vz).value = v
-  @property
-  def mass(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Body_mass).value
-  @mass.setter
-  def mass(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Body_mass).value = v
+    ctypes.c_double.from_address(self._addr + _OFF_Point_y).value = v
   def to_dict(self) -> dict:
-    return _struct_from_ctypes('Body', Body_t.from_address(self._addr))
+    return _struct_from_ctypes('Point', Point_t.from_address(self._addr))
   def __repr__(self):
-    return 'BodyView(' + str(self.to_dict()) + ')'
-_struct_view_types['Body'] = BodyView
-_NUMPY_DTYPE_Body = np.dtype([
+    return 'PointView(' + str(self.to_dict()) + ')'
+_struct_view_types['Point'] = PointView
+_NUMPY_DTYPE_Point = np.dtype([
   ('x', 'f8'),
   ('y', 'f8'),
-  ('z', 'f8'),
-  ('vx', 'f8'),
-  ('vy', 'f8'),
-  ('vz', 'f8'),
-  ('mass', 'f8'),
 ]) if _HAS_NUMPY else None
 
-class Vec3_t(ctypes.Structure):
+class Tag_t(ctypes.Structure):
   _fields_ = [
-    ('x', ctypes.c_double),
-    ('y', ctypes.c_double),
-    ('z', ctypes.c_double),
+    ('name', ctypes.c_void_p),
+    ('id', ctypes.c_int64),
   ]
-_struct_size_cache['Vec3'] = ctypes.sizeof(Vec3_t)
-_struct_types['Vec3'] = Vec3_t
-_struct_field_meta['Vec3'] = {
-  'x': ('pod', None),
-  'y': ('pod', None),
-  'z': ('pod', None),
+_struct_size_cache['Tag'] = ctypes.sizeof(Tag_t)
+_struct_types['Tag'] = Tag_t
+_struct_field_meta['Tag'] = {
+  'name': ('string', None),
+  'id': ('pod', None),
 }
-_OFF_Vec3_x = Vec3_t.x.offset
-_OFF_Vec3_y = Vec3_t.y.offset
-_OFF_Vec3_z = Vec3_t.z.offset
-class Vec3View:
+_OFF_Tag_name = Tag_t.name.offset
+_OFF_Tag_id = Tag_t.id.offset
+class TagView:
   __slots__ = ('_addr', '_owned')
   def __init__(self, addr: int, owned: bool = False):
     self._addr = addr
@@ -308,61 +255,135 @@ class Vec3View:
       _lib.ocheFree(ctypes.c_void_p(self._addr))
       self._addr = 0
   @property
-  def x(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Vec3_x).value
-  @x.setter
-  def x(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Vec3_x).value = v
+  def name(self) -> Optional[str]:
+    p = ctypes.c_void_p.from_address(self._addr + _OFF_Tag_name).value
+    return ctypes.string_at(p).decode('utf-8') if p else None
   @property
-  def y(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Vec3_y).value
-  @y.setter
-  def y(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Vec3_y).value = v
-  @property
-  def z(self) -> float:
-    return ctypes.c_double.from_address(self._addr + _OFF_Vec3_z).value
-  @z.setter
-  def z(self, v: float):
-    ctypes.c_double.from_address(self._addr + _OFF_Vec3_z).value = v
+  def id(self) -> int:
+    return ctypes.c_int64.from_address(self._addr + _OFF_Tag_id).value
+  @id.setter
+  def id(self, v: int):
+    ctypes.c_int64.from_address(self._addr + _OFF_Tag_id).value = v
   def to_dict(self) -> dict:
-    return _struct_from_ctypes('Vec3', Vec3_t.from_address(self._addr))
+    return _struct_from_ctypes('Tag', Tag_t.from_address(self._addr))
   def __repr__(self):
-    return 'Vec3View(' + str(self.to_dict()) + ')'
-_struct_view_types['Vec3'] = Vec3View
-_NUMPY_DTYPE_Vec3 = np.dtype([
-  ('x', 'f8'),
-  ('y', 'f8'),
-  ('z', 'f8'),
-]) if _HAS_NUMPY else None
+    return 'TagView(' + str(self.to_dict()) + ')'
+_struct_view_types['Tag'] = TagView
+_NUMPY_DTYPE_Tag = None  # not POD (has strings/pointers)
+
+class User_t(ctypes.Structure):
+  _fields_ = [
+    ('username', ctypes.c_void_p),
+    ('status', ctypes.c_int32),
+    ('primaryTag', Tag_t),
+  ]
+_struct_size_cache['User'] = ctypes.sizeof(User_t)
+_struct_types['User'] = User_t
+_struct_field_meta['User'] = {
+  'username': ('string', None),
+  'status': ('pod', None),
+  'primaryTag': ('struct', 'Tag'),
+}
+_OFF_User_username = User_t.username.offset
+_OFF_User_status = User_t.status.offset
+_OFF_User_primaryTag = User_t.primaryTag.offset
+class UserView:
+  __slots__ = ('_addr', '_owned')
+  def __init__(self, addr: int, owned: bool = False):
+    self._addr = addr
+    self._owned = owned
+  def __del__(self):
+    if self._owned and self._addr:
+      _lib.ocheFree(ctypes.c_void_p(self._addr))
+      self._addr = 0
+  @property
+  def username(self) -> Optional[str]:
+    p = ctypes.c_void_p.from_address(self._addr + _OFF_User_username).value
+    return ctypes.string_at(p).decode('utf-8') if p else None
+  @property
+  def status(self) -> int:
+    return ctypes.c_int32.from_address(self._addr + _OFF_User_status).value
+  @status.setter
+  def status(self, v: int):
+    ctypes.c_int32.from_address(self._addr + _OFF_User_status).value = int(v)
+  @property
+  def primaryTag(self) -> 'TagView':
+    return TagView(self._addr + _OFF_User_primaryTag, owned=False)
+  def to_dict(self) -> dict:
+    return _struct_from_ctypes('User', User_t.from_address(self._addr))
+  def __repr__(self):
+    return 'UserView(' + str(self.to_dict()) + ')'
+_struct_view_types['User'] = UserView
+_NUMPY_DTYPE_User = None  # not POD (has strings/pointers)
+
+class Status:
+  Active = 0
+  Inactive = 1
+  Pending = 2
 
 class Porche:
-  _nbodyNim = _lib.nbodyNim
-  _nbodyNim.argtypes = [ctypes.c_int64]
-  _nbodyNim.restype = ctypes.c_double
-  def nbodyNim(self, n: int) -> float:
-    r = self._nbodyNim(n)
+  _addNumbersPy = _lib.addNumbersPy
+  _addNumbersPy.argtypes = [ctypes.c_int64, ctypes.c_int64]
+  _addNumbersPy.restype = ctypes.c_int64
+  def addNumbersPy(self, a: int, b: int) -> int:
+    r = self._addNumbersPy(a, b)
     _check_error()
     return r
 
-  _spectralNormNim = _lib.spectralNormNim
-  _spectralNormNim.argtypes = [ctypes.c_int64]
-  _spectralNormNim.restype = ctypes.c_double
-  def spectralNormNim(self, n: int) -> float:
-    r = self._spectralNormNim(n)
+  _greetPy = _lib.greetPy
+  _greetPy.argtypes = [ctypes.c_char_p]
+  _greetPy.restype = ctypes.c_void_p
+  def greetPy(self, name: str) -> str:
+    r = self._greetPy(name.encode('utf-8') if name else None)
     _check_error()
-    return r
+    if r is None: return ''
+    s = ctypes.string_at(r).decode('utf-8'); _lib.ocheFree(r); return s
 
-  _generateLargeArrayView = _lib.generateLargeArrayView
-  _generateLargeArrayView.argtypes = [ctypes.c_int64]
-  _generateLargeArrayView.restype = ctypes.c_void_p
-  def generateLargeArrayView(self, n: int) -> 'SharedListView':
-    r = self._generateLargeArrayView(n)
+  _createUserPy = _lib.createUserPy
+  _createUserPy.argtypes = [ctypes.c_char_p, ctypes.c_int64]
+  _createUserPy.restype = ctypes.c_void_p
+  def createUserPy(self, name: str, tagId: int) -> 'UserView':
+    r = self._createUserPy(name.encode('utf-8') if name else None, tagId)
+    _check_error()
+    if r is None: return None
+    sz = _struct_size('User')
+    dst = _lib.ocheAllocBytes(ctypes.c_size_t(sz))
+    ctypes.memmove(dst, r, sz)
+    _lib.ocheFree(r)
+    return UserView(dst, owned=True)
+
+  _getPointsCopyPy = _lib.getPointsCopyPy
+  _getPointsCopyPy.argtypes = [ctypes.c_int64]
+  _getPointsCopyPy.restype = ctypes.c_void_p
+  def getPointsCopyPy(self, n: int) -> List['PointView']:
+    r = self._getPointsCopyPy(n)
+    _check_error()
+    if r is None: return []
+    n = ctypes.cast(r, ctypes.POINTER(ctypes.c_int64)).contents.value
+    if n <= 0: _lib.ocheFreeDeep(r); return []
+    out = [_struct_copy_view('Point', r, 16, _struct_size('Point'), i) for i in range(n)]
+    _lib.ocheFreeDeep(r); return out
+
+  _maybePoint = _lib.maybePoint
+  _maybePoint.argtypes = [ctypes.c_int64]
+  _maybePoint.restype = ctypes.c_void_p
+  def maybePoint(self, which: int) -> Optional[Any]:
+    r = self._maybePoint(which)
+    _check_error()
+    if r is None: return None
+    sz = _struct_size('Point')
+    out = _struct_copy('Point', r, 0, sz, 0); _lib.ocheFree(r); return out
+
+  _initSharedUsersPy = _lib.initSharedUsersPy
+  _initSharedUsersPy.argtypes = [ctypes.c_int64]
+  _initSharedUsersPy.restype = ctypes.c_void_p
+  def initSharedUsersPy(self, n: int) -> 'SharedListView':
+    r = self._initSharedUsersPy(n)
     _check_error()
     if r is None: return []
     n = ctypes.cast(r, ctypes.POINTER(ctypes.c_int64)).contents.value
     if n <= 0: return []
-    return SharedListView(r, n, _struct_size('Vec3'), lambda addr: Vec3View(addr), 2, True, numpy_dtype=_NUMPY_DTYPE_Vec3)
+    return SharedListView(r, n, _struct_size('User'), lambda addr: UserView(addr), 3, False, numpy_dtype=None)
 
 
 porche = Porche()

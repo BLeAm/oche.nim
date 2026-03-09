@@ -241,8 +241,8 @@ proc genPInterface*(obj: OcheObject): string =
       let inner = p.typ.inner
       let cT = if structBanks.hasKey(inner): "ctypes.c_void_p"
                else: "ctypes." & toCType(inner)
-      result &= "    " & p.name & "_arr = (" & cT & " * len(" & p.name & "))(); "
-      result &= "for i, x in enumerate(" & p.name & "): " & p.name & "_arr[i] = x\n"
+      result &= "    " & p.name & "_arr = (" & cT & " * len(" & p.name & "))()\n"
+      result &= "    for i, x in enumerate(" & p.name & "): " & p.name & "_arr[i] = x\n"
     elif structBanks.hasKey(p.typ.name):
       result &= "    " & p.name & "_buf = _pack_struct('" & p.typ.name & "', " & p.name & ") if " & p.name & " is not None else None\n"
 

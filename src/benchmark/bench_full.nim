@@ -2,14 +2,14 @@ import ../oche
 import std/[math, sequtils]
 
 type 
-  Body {.porche.} = object
+  Body {.oche,porche.} = object
     x, y, z, vx, vy, vz, mass: float64
 
-  Vec3 {.porche.} = object
+  Vec3 {.oche,porche.} = object
     x, y, z: float64
 
 # [1] N-Body
-proc nbodyNim(n: int): float64 {.porche.} =
+proc nbodyNim(n: int): float64 {.oche,porche.} =
   var bodies = @[
     Body(mass: 39.478), 
     Body(x: 4.84, y: -1.16, z: -0.103, vx: 0.606, vy: 2.812, vz: -0.025, mass: 0.037)
@@ -28,7 +28,7 @@ proc nbodyNim(n: int): float64 {.porche.} =
 # [2] Spectral Norm (แก้จุด error 'j' ตรงนี้ครับ)
 proc A(i, j: int): float64 = 1.0 / (((i + j) * (i + j + 1) div 2 + i + 1).float64)
 
-proc spectralNormNim(n: int): float64 {.porche.} =
+proc spectralNormNim(n: int): float64 {.oche,porche.} =
   var u = newSeqWith(n, 1.0)
   var v = newSeq[float64](n)
   for _ in 0..9:
@@ -42,9 +42,10 @@ proc spectralNormNim(n: int): float64 {.porche.} =
   return sqrt(u[0])
 
 # [3] Zero-Copy View
-proc generateLargeArrayView(n: int): OcheBuffer[Vec3] {.porche.} =
+proc generateLargeArrayView(n: int): OcheBuffer[Vec3] {.oche,porche.} =
   result = newOche[Vec3](n) 
   for i in 0..<n:
     result[i] = Vec3(x: i.float, y: i.float * 2.0, z: i.float * 3.0)
 
+generate("nlib_full.dart")
 generatePython("nlib_full.py")

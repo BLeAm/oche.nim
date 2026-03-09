@@ -27,7 +27,7 @@ proc advance(bodies: var seq[Body], dt: float64) =
     bodies[i].y += dt * bodies[i].vy
     bodies[i].z += dt * bodies[i].vz
 
-proc nbodyNim(n: int): float64 {.oche.} =
+proc nbodyNim(n: int): float64 {.oche, porche.} =
   var bodies = @[
     Body(mass: SOLAR_MASS),
     Body(x: 4.84, y: -1.16, z: -0.103, vx: 1.66e-3 * DAYS_PER_YEAR, vy: 7.69e-3 * DAYS_PER_YEAR, vz: -6.90e-5 * DAYS_PER_YEAR, mass: 9.54e-4 * SOLAR_MASS)
@@ -36,7 +36,7 @@ proc nbodyNim(n: int): float64 {.oche.} =
   return bodies[0].x
 
 # 2. Fannkuch-Redux
-proc fannkuchNim(n: int): int {.oche.} =
+proc fannkuchNim(n: int): int {.oche, porche.} =
   var p = newSeq[int](n); var q = newSeq[int](n); var s = newSeq[int](n)
   for i in 0..<n: p[i] = i; s[i] = i
   var maxFlips = 0; var sign = 1
@@ -77,7 +77,7 @@ proc multiplyAtv(v: seq[float64], Atv: var seq[float64]) =
     Atv[i] = 0.0
     for j in 0..<v.len: Atv[i] += A(j, i) * v[j]
 
-proc spectralNormNim(n: int): float64 {.oche.} =
+proc spectralNormNim(n: int): float64 {.oche, porche.} =
   var u = newSeqWith(n, 1.0); var v = newSeq[float64](n); var tmp = newSeq[float64](n)
   for i in 0..9:
     multiplyAv(u, tmp); multiplyAtv(tmp, v)
@@ -98,12 +98,12 @@ proc checkTree(node: Node): int =
   if node.left.isNil: return 1
   return 1 + checkTree(node.left) + checkTree(node.right)
 
-proc binaryTreesNim(depth: int): int {.oche.} =
+proc binaryTreesNim(depth: int): int {.oche, porche.} =
   let tree = makeTree(depth)
   return checkTree(tree)
 
 # 5. Mandelbrot
-proc mandelbrotNim(n: int): int {.oche.} =
+proc mandelbrotNim(n: int): int {.oche, porche.} =
   var count = 0
   for y in 0..<n:
     let cy = -1.5 + 3.0 * y.float / n.float
@@ -117,3 +117,4 @@ proc mandelbrotNim(n: int): int {.oche.} =
   return count
 
 generate("nlib_suite.dart")
+generatePython("nlib_suite.py")
