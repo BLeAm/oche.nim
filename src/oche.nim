@@ -18,6 +18,22 @@ type
   OcheBuffer*[T] = object
     p*: pointer
 
+## Zero-copy read-only view into a caller-owned contiguous buffer.
+## Used for input parameters — Nim never copies, never frees.
+type
+  OcheArray*[T] = object
+    p*: ptr UncheckedArray[T]
+    len*: int
+
+## True zero-copy raw pointer input — caller allocates with malloc/calloc and
+## manages lifetime entirely. No length metadata on wire — caller passes len separately.
+## In Dart: pass ffi.Pointer<T> directly (outside VM heap, GC-safe).
+## In Python: pass numpy array or ctypes pointer (same zero-copy path as OcheArray).
+type
+  OchePtr*[T] = object
+    p*:   ptr UncheckedArray[T]
+    len*: int
+
 proc len*[T](b: OcheBuffer[T]): int =
   if b.p.isNil: return 0
   cast[ptr int64](b.p)[]
@@ -32,6 +48,40 @@ proc `[]`*[T](b: OcheBuffer[T], idx: int): var T =
 proc `[]=`*[T](b: OcheBuffer[T], idx: int, val: T) =
   if idx < 0 or idx >= b.len: raise newException(IndexDefect, "OcheBuffer index out of bounds")
   b.dataPtr[idx] = val
+
+## OcheArray helpers — zero-copy view, never frees
+proc `[]`*[T](a: OcheArray[T], idx: int): T =
+  a.p[idx]
+
+proc `[]=`*[T](a: OcheArray[T], idx: int, val: T) =
+  a.p[idx] = val
+
+iterator items*[T](a: OcheArray[T]): T =
+  for i in 0 ..< a.len: yield a.p[i]
+
+iterator pairs*[T](a: OcheArray[T]): (int, T) =
+  for i in 0 ..< a.len: yield (i, a.p[i])
+
+proc toSeq*[T](a: OcheArray[T]): seq[T] =
+  result = newSeq[T](a.len)
+  if a.len > 0: copyMem(addr result[0], a.p, a.len * sizeof(T))
+
+## OchePtr helpers — same API as OcheArray, distinct type for emitter routing
+proc `[]`*[T](a: OchePtr[T], idx: int): T =
+  a.p[idx]
+
+proc `[]=`*[T](a: OchePtr[T], idx: int, val: T) =
+  a.p[idx] = val
+
+iterator items*[T](a: OchePtr[T]): T =
+  for i in 0 ..< a.len: yield a.p[i]
+
+iterator pairs*[T](a: OchePtr[T]): (int, T) =
+  for i in 0 ..< a.len: yield (i, a.p[i])
+
+proc toSeq*[T](a: OchePtr[T]): seq[T] =
+  result = newSeq[T](a.len)
+  if a.len > 0: copyMem(addr result[0], a.p, a.len * sizeof(T))
 
 proc newOcheBuffer*[T](n: int, typeId: int = 0): OcheBuffer[T] =
   let p = cast[ptr byte](alloc0(16 + (n * sizeof(T))))
@@ -101,15 +151,49 @@ proc processOche(body: NimNode, isView: bool, backend: static Backend = bDart): 
   let retByPointer = obj.retType.isSeq or obj.retType.isOption or obj.retType.name in ["string", "cstring"] or obj.retType.isShared or structBanks.hasKey(obj.retType.name)
   if retByPointer: ffiParams.add ident("pointer") else: ffiParams.add originalRetType
 
+  # reconstruction: build local vars for non-seq params
+  # seq params are passed inline via toOpenArray() in the call — no local needed
   var reconstruction = newStmtList()
+  var internalCallArgs: seq[NimNode]
   for p in obj.params:
     if p.typ.isSeq:
       let pP = ident(p.name & "_ptr"); let pL = ident(p.name & "_len"); let iT = ident(p.typ.inner)
       ffiParams.add newIdentDefs(pP, newTree(nnkPtrTy, iT)); ffiParams.add newIdentDefs(pL, ident("int"))
-      reconstruction.add newLetStmt(ident(p.name), newTree(nnkPrefix, ident("@"), newTree(nnkCall, ident("toOpenArray"), newTree(nnkCast, newTree(nnkPtrTy, newTree(nnkBracketExpr, ident("UncheckedArray"), iT)), pP), newLit(0), newTree(nnkInfix, ident("-"), pL, newLit(1)))))
+      # Pass toOpenArray() directly as call arg — openArray cannot be a local variable
+      internalCallArgs.add newTree(nnkCall, ident("toOpenArray"),
+        newTree(nnkCast,
+          newTree(nnkPtrTy, newTree(nnkBracketExpr, ident("UncheckedArray"), iT)),
+          pP),
+        newLit(0),
+        newTree(nnkInfix, ident("-"), pL, newLit(1)))
+    elif p.typ.isArray:
+      let pP = ident(p.name & "_ptr"); let pL = ident(p.name & "_len"); let iT = ident(p.typ.inner)
+      ffiParams.add newIdentDefs(pP, newTree(nnkPtrTy, iT)); ffiParams.add newIdentDefs(pL, ident("int"))
+      internalCallArgs.add newTree(nnkObjConstr,
+        newTree(nnkBracketExpr, ident("OcheArray"), iT),
+        newColonExpr(ident("p"),
+          newTree(nnkCast,
+            newTree(nnkPtrTy, newTree(nnkBracketExpr, ident("UncheckedArray"), iT)),
+            pP)),
+        newColonExpr(ident("len"), pL))
+    elif p.typ.isPtr:
+      # OchePtr[T] — same wire format as OcheArray (ptr + len), different emitter routing
+      let pP = ident(p.name & "_ptr"); let pL = ident(p.name & "_len"); let iT = ident(p.typ.inner)
+      ffiParams.add newIdentDefs(pP, newTree(nnkPtrTy, iT)); ffiParams.add newIdentDefs(pL, ident("int"))
+      internalCallArgs.add newTree(nnkObjConstr,
+        newTree(nnkBracketExpr, ident("OchePtr"), iT),
+        newColonExpr(ident("p"),
+          newTree(nnkCast,
+            newTree(nnkPtrTy, newTree(nnkBracketExpr, ident("UncheckedArray"), iT)),
+            pP)),
+        newColonExpr(ident("len"), pL))
     elif p.typ.name in ["string", "cstring"]:
-      ffiParams.add newIdentDefs(ident(p.name & "_raw"), ident("cstring")); reconstruction.add newLetStmt(ident(p.name), newTree(nnkPrefix, ident("$"), ident(p.name & "_raw")))
-    elif enumBanks.hasKey(p.typ.name): ffiParams.add newIdentDefs(ident(p.name), ident("int32"))
+      ffiParams.add newIdentDefs(ident(p.name & "_raw"), ident("cstring"))
+      reconstruction.add newLetStmt(ident(p.name), newTree(nnkPrefix, ident("$"), ident(p.name & "_raw")))
+      internalCallArgs.add ident(p.name)
+    elif enumBanks.hasKey(p.typ.name):
+      ffiParams.add newIdentDefs(ident(p.name), ident("int32"))
+      internalCallArgs.add ident(p.name)
     else:
       if structBanks.hasKey(p.typ.name):
         let pPtr = ident(p.name & "_ptr")
@@ -117,6 +201,7 @@ proc processOche(body: NimNode, isView: bool, backend: static Backend = bDart): 
         reconstruction.add newLetStmt(ident(p.name), newTree(nnkDerefExpr, pPtr))
       else:
         ffiParams.add newIdentDefs(ident(p.name), ident(p.typ.name))
+      internalCallArgs.add ident(p.name)
 
   let resNode = ident"res"
   var conv: NimNode
@@ -146,19 +231,53 @@ proc processOche(body: NimNode, isView: bool, backend: static Backend = bDart): 
   let internalProc = ident"internal"
   let isVoid = originalRetType.kind == nnkIdent and originalRetType.strVal == "void"
 
+  # Build internalProc's formal params — seq[T] params become openArray[T]
+  # so toOpenArray() result can be passed without heap allocation.
+  var internalFormalParams = newTree(nnkFormalParams)
+  if isVoid: internalFormalParams.add newEmptyNode()
+  else:      internalFormalParams.add originalRetType
+  for p in obj.params:
+    if p.typ.isSeq:
+      let iT = ident(p.typ.inner)
+      internalFormalParams.add newIdentDefs(ident(p.name),
+        newTree(nnkBracketExpr, ident("openArray"), iT))
+    elif p.typ.isArray:
+      let iT = ident(p.typ.inner)
+      internalFormalParams.add newIdentDefs(ident(p.name),
+        newTree(nnkBracketExpr, ident("OcheArray"), iT))
+    elif p.typ.isPtr:
+      let iT = ident(p.typ.inner)
+      internalFormalParams.add newIdentDefs(ident(p.name),
+        newTree(nnkBracketExpr, ident("OchePtr"), iT))
+    elif p.typ.name in ["string", "cstring"]:
+      internalFormalParams.add newIdentDefs(ident(p.name), ident("string"))
+    elif enumBanks.hasKey(p.typ.name):
+      internalFormalParams.add newIdentDefs(ident(p.name), ident(p.typ.name))
+    elif structBanks.hasKey(p.typ.name):
+      internalFormalParams.add newIdentDefs(ident(p.name), ident(p.typ.name))
+    else:
+      internalFormalParams.add newIdentDefs(ident(p.name), ident(p.typ.name))
+
+  # Build call args for internalProc() — pass reconstructed locals
+  let internalCall = newCall(internalProc, internalCallArgs)
+
   var wrappedBody: NimNode
   if isVoid:
+    let internalProcDef = newTree(nnkProcDef, internalProc, newEmptyNode(), newEmptyNode(),
+      internalFormalParams, newEmptyNode(), newEmptyNode(), originalBody)
     wrappedBody = quote do:
       `reconstruction`
-      proc `internalProc`() = `originalBody`
-      try: `internalProc`()
+      `internalProcDef`
+      try: `internalCall`
       except Exception as e: lastOcheError = e.msg
   else:
+    let internalProcDef = newTree(nnkProcDef, internalProc, newEmptyNode(), newEmptyNode(),
+      internalFormalParams, newEmptyNode(), newEmptyNode(), originalBody)
     wrappedBody = quote do:
       `reconstruction`
-      proc `internalProc`(): `originalRetType` = `originalBody`
+      `internalProcDef`
       try:
-        let `resNode` = `internalProc`()
+        let `resNode` = `internalCall`
         result = `conv`
       except Exception as e:
         lastOcheError = e.msg
@@ -249,7 +368,16 @@ macro generate*(output: static string): untyped =
   var code = "//------------------ Generated by Oche ------------------\n"
   code &= "//              Don't edit this file by hand!\n"
   code &= "// ------------------------------------------------------\n"
-  code &= "import 'dart:ffi' as ffi;\nimport 'dart:io' show Platform;\nimport 'dart:collection';\nimport 'package:ffi/ffi.dart';\n\nfinal String _libName = Platform.isWindows ? '" & libname & ".dll' : (Platform.isMacOS ? '" & libname & ".dylib' : '" & libname & ".so');\nfinal dynlib = ffi.DynamicLibrary.open('./$_libName');\nfinal _ocheFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFree');\nfinal _ocheFreeDeep = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFreeDeep');\nfinal _ocheFreeInner = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer, ffi.Int32), void Function(ffi.Pointer, int)>('ocheFreeInner');\nfinal _ocheGetError = dynlib.lookupFunction<ffi.Pointer<Utf8> Function(), ffi.Pointer<Utf8> Function()>('ocheGetError');\nvoid _checkError() { final ptr = _ocheGetError(); if (ptr.address != 0) { final msg = ptr.toDartString(); _ocheFree(ptr); throw Exception('NimError: $msg'); } }\n"
+  code &= "import 'dart:ffi' as ffi;\nimport 'dart:io' show Platform;\nimport 'dart:collection';\nimport 'dart:typed_data' as typed_data;\nimport 'package:ffi/ffi.dart';\n\n"
+  code &= "final String _libName = Platform.isWindows ? '" & libname & ".dll' : (Platform.isMacOS ? '" & libname & ".dylib' : '" & libname & ".so');\n"
+  code &= "final dynlib = ffi.DynamicLibrary.open('./$_libName');\n"
+  code &= "final _ocheFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFree');\n"
+  code &= "final _ocheFreeDeep = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFreeDeep');\n"
+  code &= "final _ocheFreeInner = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer, ffi.Int32), void Function(ffi.Pointer, int)>('ocheFreeInner');\n"
+  code &= "final _ocheStrAlloc = dynlib.lookupFunction<ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8>), ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8>)>('ocheStrAlloc');\n"
+  code &= "final _ocheStrFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer<ffi.Void>), void Function(ffi.Pointer<ffi.Void>)>('ocheStrFree');\n"
+  code &= "final _ocheGetError = dynlib.lookupFunction<ffi.Pointer<Utf8> Function(), ffi.Pointer<Utf8> Function()>('ocheGetError');\n"
+  code &= "void _checkError() { final ptr = _ocheGetError(); if (ptr.address != 0) { final msg = ptr.toDartString(); _ocheFree(ptr); throw Exception('NimError: $msg'); } }\n"
 
   var inner = ""
   for o in ooBanks: inner &= genDInterface(o)
@@ -277,12 +405,12 @@ macro generate*(output: static string): untyped =
           "  }\n" &
           "  @override ffi.Pointer<ffi.Void> get _nativePtr => _ptr;\n" &
           "  @override T operator [](int index) {\n" &
-          "    if (_ptr.address == 0) throw StateError('NativeListView has been disposed');\n" &
+          "    if (_ptr.address == 0) throw StateError('NativeListView has been freed');\n" &
           "    if (index < 0 || index >= length) throw RangeError.index(index, this);\n" &
           "    return _unpacker(ffi.Pointer<ffi.Void>.fromAddress(_ptr.address + 16 + (index * _elemSize)));\n" &
           "  }\n" &
           "  @override void operator []=(int index, T value) => throw UnsupportedError('View mode is read-only. Use Buffer mode for mutation.');\n" &
-          "  void dispose() {\n" &
+          "  void free() {\n" &
           "    if (_ptr.address == 0) return;\n" &
           "    _finalizerDeep.detach(this);\n" &
           "    _ocheFreeDeep(_ptr);\n" &
@@ -301,12 +429,12 @@ macro generate*(output: static string): untyped =
           "  }\n" &
           "  @override ffi.Pointer<ffi.Void> get _nativePtr => _ptr;\n" &
           "  @override T operator [](int index) {\n" &
-          "    if (_ptr.address == 0) throw StateError('SharedListView has been disposed');\n" &
+          "    if (_ptr.address == 0) throw StateError('SharedListView has been freed');\n" &
           "    if (index < 0 || index >= length) throw RangeError.index(index, this);\n" &
           "    return _unpacker(ffi.Pointer<ffi.Void>.fromAddress(_ptr.address + 16 + (index * _elemSize)));\n" &
           "  }\n" &
           "  @override void operator []=(int index, dynamic value) {\n" &
-          "    if (_ptr.address == 0) throw StateError('SharedListView has been disposed');\n" &
+          "    if (_ptr.address == 0) throw StateError('SharedListView has been freed');\n" &
           "    if (index < 0 || index >= length) throw RangeError.index(index, this);\n" &
           "    final flags = ffi.Pointer<ffi.Int32>.fromAddress(_ptr.address + 12).value;\n" &
           "    if ((flags & 1) != 0) throw StateError('Buffer is frozen (READ-ONLY)');\n" &
@@ -329,6 +457,12 @@ macro generate*(output: static string): untyped =
   writeFile(output, code)
 
   var free = "proc ocheFree(p: pointer) {.exportc, dynlib.} = (if not p.isNil: dealloc(p))\n"
+  free &= "proc ocheStrAlloc(s: cstring): pointer {.exportc, dynlib.} =\n"
+  free &= "  if s.isNil: return nil\n"
+  free &= "  let n = s.len\n"
+  free &= "  result = alloc0(n + 1)\n"
+  free &= "  copyMem(result, s, n + 1)\n"
+  free &= "proc ocheStrFree(p: pointer) {.exportc, dynlib.} = (if not p.isNil: dealloc(p))\n"
 
   for s in structBanks.values:
     free &= "proc ocheFreeInner" & s.name & "(o: ptr " & s.name & ") = \n"
@@ -379,7 +513,7 @@ macro generatePython*(output: static string): untyped =
   var code = "# ------------------ Generated by Porche ------------------\n"
   code &= "#              Don't edit this file by hand!\n"
   code &= "# -----------------------------------------------------------\n"
-  code &= "from typing import Optional, Any, List\n"
+  code &= "from typing import Optional, Any, List, Union\n"
   code &= "import ctypes\n"
   code &= "import os\n\n"
   code &= genPythonPrelude()
@@ -395,6 +529,10 @@ macro generatePython*(output: static string): untyped =
   code &= "_ocheFreeInner.restype = None\n"
   code &= "_lib.ocheAllocBytes.argtypes = [ctypes.c_size_t]\n"
   code &= "_lib.ocheAllocBytes.restype = ctypes.c_void_p\n"
+  code &= "_lib.ocheStrAlloc.argtypes = [ctypes.c_char_p]\n"
+  code &= "_lib.ocheStrAlloc.restype = ctypes.c_void_p\n"
+  code &= "_lib.ocheStrFree.argtypes = [ctypes.c_void_p]\n"
+  code &= "_lib.ocheStrFree.restype = None\n"
   code &= "_oche_get_error = _lib.ocheGetError\n"
   code &= "_oche_get_error.restype = ctypes.c_void_p\n"
   code &= "def _check_error():\n"
@@ -426,6 +564,12 @@ macro generatePython*(output: static string): untyped =
 
   var free = "proc ocheFree(p: pointer) {.exportc, dynlib.} = (if not p.isNil: dealloc(p))\n"
   free &= "proc ocheAllocBytes(n: csize_t): pointer {.exportc, dynlib.} = alloc0(n)\n"
+  free &= "proc ocheStrAlloc(s: cstring): pointer {.exportc, dynlib.} =\n"
+  free &= "  if s.isNil: return nil\n"
+  free &= "  let n = s.len\n"
+  free &= "  result = alloc0(n + 1)\n"
+  free &= "  copyMem(result, s, n + 1)\n"
+  free &= "proc ocheStrFree(p: pointer) {.exportc, dynlib.} = (if not p.isNil: dealloc(p))\n"
 
   for s in structBanks.values:
     free &= "proc ocheFreeInner" & s.name & "(o: ptr " & s.name & ") = \n"

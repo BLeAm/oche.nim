@@ -29,8 +29,11 @@ proc toCType*(t: string): string =
 
 proc toPythonType*(t: string): string =
   if t.startsWith("seq["): return "List[Any]"
+  if t.startsWith("OcheArray["): return "Any"   ## numpy array, list, or buffer — detected at runtime
+  if t.startsWith("OchePtr["):   return "Any"   ## numpy array or ctypes pointer — zero-copy, caller owns
   if t.startsWith("Option["): return "Optional[" & toPythonType(t[7..^2]) & "]"
   if t.startsWith("OcheBuffer["): return "'SharedListView'"
+  if structBanks.hasKey(t): return "Union['" & t & "', '" & t & "View']"
   case t
   of "int", "int64", "uint8": return "int"
   of "float", "float64", "float32": return "float"
@@ -47,12 +50,12 @@ proc toPythonReturnType*(obj: OcheObject): string =
     if obj.isView: return "'NativeListView'"
     else:
       let inner = obj.retType.inner
-      if structBanks.hasKey(inner): return "List['" & inner & "View']"
+      if structBanks.hasKey(inner): return "List['" & inner & "']"  # plain Xxx
       else: return "List[Any]"
   if obj.retType.isShared: return "'SharedListView'"
   if structBanks.hasKey(obj.retType.name):
-    if obj.isView: return "'" & obj.retType.name & "View'"
-    else: return "'" & obj.retType.name & "View'"  # both modes return XxxView now
+    # copy mode → Xxx plain class; view mode on single struct → also Xxx (fallback)
+    return "'" & obj.retType.name & "'"
   if enumBanks.hasKey(obj.retType.name): return "int"
   return toPythonType(obj.retType.name)
 
@@ -133,6 +136,10 @@ proc genPStruct*(s: OcheStruct): string =
   result &= "    self._owned = owned\n"
   result &= "  def __del__(self):\n"
   result &= "    if self._owned and self._addr:\n"
+  for f in s.fields:
+    if f.typ.name in ["string", "cstring"]:
+      result &= "      _p = ctypes.c_void_p.from_address(self._addr + _OFF_" & s.name & "_" & f.name & ").value\n"
+      result &= "      if _p: _lib.ocheStrFree(ctypes.c_void_p(_p))\n"
   result &= "      _lib.ocheFree(ctypes.c_void_p(self._addr))\n"
   result &= "      self._addr = 0\n"
 
@@ -143,6 +150,12 @@ proc genPStruct*(s: OcheStruct): string =
       result &= "  def " & f.name & "(self) -> Optional[str]:\n"
       result &= "    p = ctypes.c_void_p.from_address(self._addr + " & offExpr & ").value\n"
       result &= "    return ctypes.string_at(p).decode('utf-8') if p else None\n"
+      result &= "  @" & f.name & ".setter\n"
+      result &= "  def " & f.name & "(self, v: Optional[str]):\n"
+      result &= "    old = ctypes.c_void_p.from_address(self._addr + " & offExpr & ").value\n"
+      result &= "    if old: _lib.ocheStrFree(ctypes.c_void_p(old))\n"
+      result &= "    new_p = _lib.ocheStrAlloc(v.encode('utf-8')) if v is not None else 0\n"
+      result &= "    ctypes.c_void_p.from_address(self._addr + " & offExpr & ").value = new_p\n"
     elif structBanks.hasKey(f.typ.name):
       # nested inline struct: always owned=False — parent controls the memory
       result &= "  @property\n"
@@ -168,9 +181,40 @@ proc genPStruct*(s: OcheStruct): string =
   result &= "  def to_dict(self) -> dict:\n"
   result &= "    return _struct_from_ctypes('" & s.name &
             "', " & s.name & "_t.from_address(self._addr))\n"
+  result &= "  def freeze(self) -> '" & s.name & "':\n"
+  result &= "    return " & s.name & "._from_view(self)\n"
   result &= "  def __repr__(self):\n"
   result &= "    return '" & s.name & "View(' + str(self.to_dict()) + ')'\n"
   result &= "_struct_view_types['" & s.name & "'] = " & s.name & "View\n"
+  # ── Xxx plain Python class (mutable, GC-owned, equivalent to Dart's User) ──
+  result &= "class " & s.name & ":\n"
+  result &= "  __slots__ = ("
+  for i, f in s.fields:
+    result &= "'" & f.name & "'"
+    if i < s.fields.len - 1: result &= ", "
+  result &= ")\n"
+  result &= "  def __init__(self, "
+  for i, f in s.fields:
+    result &= f.name & "=None"
+    if i < s.fields.len - 1: result &= ", "
+  result &= "):\n"
+  for f in s.fields:
+    result &= "    self." & f.name & " = " & f.name & "\n"
+  result &= "  @staticmethod\n"
+  result &= "  def _from_view(v: '" & s.name & "View') -> '" & s.name & "':\n"
+  result &= "    return " & s.name & "("
+  for i, f in s.fields:
+    if f.typ.name in ["string", "cstring"]:
+      result &= f.name & "=v." & f.name
+    elif structBanks.hasKey(f.typ.name):
+      result &= f.name & "=" & f.typ.name & "._from_view(v." & f.name & ")"
+    else:
+      result &= f.name & "=v." & f.name
+    if i < s.fields.len - 1: result &= ", "
+  result &= ")\n"
+  result &= "  def __repr__(self):\n"
+  result &= "    return '" & s.name & "(' + ', '.join(f'{k}={getattr(self,k)!r}' for k in self.__slots__) + ')'\n"
+  result &= "_struct_plain_types['" & s.name & "'] = " & s.name & "\n"
 
   # ── 5. numpy structured dtype (POD structs only) ──────────────────────────
   if s.isPOD:
@@ -206,8 +250,26 @@ proc genPInterface*(obj: OcheObject): string =
                else: "ctypes." & toCType(inner)
       cParams.add "ctypes.POINTER(" & cT & ")"
       cParams.add "ctypes.c_int64"
-      pyArgList.add p.name & "_arr"
-      pyArgList.add "len(" & p.name & ")"
+      pyArgList.add p.name & "_ptr"
+      pyArgList.add p.name & "_len"
+    elif p.typ.isArray:
+      # OcheArray — same wire format as seq (ptr + len) but zero-copy fast path
+      let inner = p.typ.inner
+      let cT = if structBanks.hasKey(inner): "ctypes.c_void_p"
+               else: "ctypes." & toCType(inner)
+      cParams.add "ctypes.POINTER(" & cT & ")"
+      cParams.add "ctypes.c_int64"
+      pyArgList.add p.name & "_ptr"
+      pyArgList.add p.name & "_len"
+    elif p.typ.isPtr:
+      # OchePtr — true zero-copy: numpy array or raw ctypes pointer
+      let inner = p.typ.inner
+      let cT = if structBanks.hasKey(inner): "ctypes.c_void_p"
+               else: "ctypes." & toCType(inner)
+      cParams.add "ctypes.POINTER(" & cT & ")"
+      cParams.add "ctypes.c_int64"
+      pyArgList.add p.name & "_ptr"
+      pyArgList.add p.name & "_len"
     elif p.typ.name in ["string", "cstring"]:
       cParams.add "ctypes.c_char_p"
       pyArgList.add p.name & ".encode('utf-8') if " & p.name & " else None"
@@ -241,8 +303,56 @@ proc genPInterface*(obj: OcheObject): string =
       let inner = p.typ.inner
       let cT = if structBanks.hasKey(inner): "ctypes.c_void_p"
                else: "ctypes." & toCType(inner)
-      result &= "    " & p.name & "_arr = (" & cT & " * len(" & p.name & "))()\n"
-      result &= "    for i, x in enumerate(" & p.name & "): " & p.name & "_arr[i] = x\n"
+      let npDtype = toNumpyDtypeChar(inner)
+      # Fast path 1: numpy array with matching dtype — zero-copy, just grab pointer
+      # Fast path 2: any object with buffer protocol (array.array, memoryview, etc.)
+      # Slow path: generic Python iterable — ctypes unpack (C-level, still faster than enumerate loop)
+      result &= "    if _HAS_NUMPY and isinstance(" & p.name & ", np.ndarray) and " & p.name & ".dtype == np.dtype(" & npDtype & ") and " & p.name & ".data.contiguous:\n"
+      result &= "      " & p.name & "_ptr = " & p.name & ".ctypes.data_as(ctypes.POINTER(" & cT & "))\n"
+      result &= "      " & p.name & "_len = len(" & p.name & ")\n"
+      result &= "    elif hasattr(" & p.name & ", 'buffer_info'):\n"
+      result &= "      _buf_ptr, _buf_len = " & p.name & ".buffer_info()\n"
+      result &= "      " & p.name & "_ptr = ctypes.cast(_buf_ptr, ctypes.POINTER(" & cT & "))\n"
+      result &= "      " & p.name & "_len = _buf_len\n"
+      result &= "    else:\n"
+      result &= "      " & p.name & "_arr = (" & cT & " * len(" & p.name & "))(*" & p.name & ")\n"
+      result &= "      " & p.name & "_ptr = " & p.name & "_arr\n"
+      result &= "      " & p.name & "_len = len(" & p.name & ")\n"
+    elif p.typ.isArray:
+      let inner = p.typ.inner
+      let cT = if structBanks.hasKey(inner): "ctypes.c_void_p"
+               else: "ctypes." & toCType(inner)
+      let npDtype = toNumpyDtypeChar(inner)
+      # OcheArray: always zero-copy — require contiguous numeric buffer
+      result &= "    if _HAS_NUMPY and isinstance(" & p.name & ", np.ndarray):\n"
+      result &= "      if not " & p.name & ".data.contiguous: " & p.name & " = np.ascontiguousarray(" & p.name & ", dtype=np.dtype(" & npDtype & "))\n"
+      result &= "      " & p.name & "_ptr = " & p.name & ".ctypes.data_as(ctypes.POINTER(" & cT & "))\n"
+      result &= "      " & p.name & "_len = len(" & p.name & ")\n"
+      result &= "    elif hasattr(" & p.name & ", 'buffer_info'):\n"
+      result &= "      _buf_ptr, _buf_len = " & p.name & ".buffer_info()\n"
+      result &= "      " & p.name & "_ptr = ctypes.cast(_buf_ptr, ctypes.POINTER(" & cT & "))\n"
+      result &= "      " & p.name & "_len = _buf_len\n"
+      result &= "    else:\n"
+      result &= "      raise TypeError('OcheArray parameter \\'" & p.name & "\\' requires a contiguous buffer (numpy array or array.array). Got: ' + type(" & p.name & ").__name__)\n"
+    elif p.typ.isPtr:
+      let inner = p.typ.inner
+      let cT = if structBanks.hasKey(inner): "ctypes.c_void_p"
+               else: "ctypes." & toCType(inner)
+      let npDtype = toNumpyDtypeChar(inner)
+      # OchePtr: same zero-copy paths as OcheArray + accepts raw ctypes pointer directly
+      result &= "    if isinstance(" & p.name & ", ctypes.POINTER(" & cT & ")) or isinstance(" & p.name & ", ctypes.Array):\n"
+      result &= "      " & p.name & "_ptr = ctypes.cast(" & p.name & ", ctypes.POINTER(" & cT & "))\n"
+      result &= "      " & p.name & "_len = " & p.name & "._length_ if hasattr(" & p.name & ", '_length_') else ctypes.sizeof(" & p.name & ") // ctypes.sizeof(" & cT & ")\n"
+      result &= "    elif _HAS_NUMPY and isinstance(" & p.name & ", np.ndarray):\n"
+      result &= "      if not " & p.name & ".data.contiguous: " & p.name & " = np.ascontiguousarray(" & p.name & ", dtype=np.dtype(" & npDtype & "))\n"
+      result &= "      " & p.name & "_ptr = " & p.name & ".ctypes.data_as(ctypes.POINTER(" & cT & "))\n"
+      result &= "      " & p.name & "_len = len(" & p.name & ")\n"
+      result &= "    elif hasattr(" & p.name & ", 'buffer_info'):\n"
+      result &= "      _buf_ptr, _buf_len = " & p.name & ".buffer_info()\n"
+      result &= "      " & p.name & "_ptr = ctypes.cast(_buf_ptr, ctypes.POINTER(" & cT & "))\n"
+      result &= "      " & p.name & "_len = _buf_len\n"
+      result &= "    else:\n"
+      result &= "      raise TypeError('OchePtr parameter \\'" & p.name & "\\' requires a ctypes pointer, numpy array, or array.array. Got: ' + type(" & p.name & ").__name__)\n"
     elif structBanks.hasKey(p.typ.name):
       result &= "    " & p.name & "_buf = _pack_struct('" & p.typ.name & "', " & p.name & ") if " & p.name & " is not None else None\n"
 
@@ -274,7 +384,7 @@ proc genPInterface*(obj: OcheObject): string =
     else:
       # ── COPY MODE: each element copied into a Python-owned XxxView ────────
       if isStruct:
-        result &= "    out = [_struct_copy_view('" & inner & "', r, 16, " & sz & ", i) for i in range(n)]\n"
+        result &= "    out = [_struct_unpack_plain('" & inner & "', r, 16, " & sz & ", i) for i in range(n)]\n"
         result &= "    _lib.ocheFreeDeep(r); return out\n"
       else:
         result &= "    data_addr = ctypes.cast(r, ctypes.c_void_p).value + 16\n"
@@ -294,7 +404,7 @@ proc genPInterface*(obj: OcheObject): string =
     result &= "    if r is None: return None\n"
     if isStruct:
       result &= "    sz = _struct_size('" & inner & "')\n"
-      result &= "    out = _struct_copy('" & inner & "', r, 0, sz, 0); _lib.ocheFree(r); return out\n"
+      result &= "    out = _struct_unpack_plain('" & inner & "', r, 0, sz, 0); _lib.ocheFree(r); return out\n"
     else:
       result &= "    out = ctypes.cast(r, ctypes.POINTER(" & toCType(inner) & ")).contents.value\n"
       result &= "    _lib.ocheFree(r); return out\n"
@@ -321,19 +431,26 @@ proc genPInterface*(obj: OcheObject): string =
   elif structBanks.hasKey(obj.retType.name):
     let sn = obj.retType.name
     if obj.isView:
-      # view mode on single struct return is unsafe — the struct lives on the Nim
-      # stack and is gone immediately after the proc returns, leaving a dangling
-      # pointer. Fallback to copy mode. The compile-time warning is emitted by
-      # genPInterface's caller (generatePython macro) via parseStmt.
-      result &= "    # WARNING: {.porche:view.} ignored for single-struct return '" &
-                obj.name & "' — copy mode used instead (stack safety)\n"
+      result &= "    # NOTE: {.porche:view.} ignored for single-struct return — copy mode used\n"
     result &= "    if r is None: return None\n"
-    # always copy mode for single struct — memcpy into Python-owned buffer
-    result &= "    sz = _struct_size('" & sn & "')\n"
-    result &= "    dst = _lib.ocheAllocBytes(ctypes.c_size_t(sz))\n"
-    result &= "    ctypes.memmove(dst, r, sz)\n"
+    # Unpack into a plain Xxx Python object (GC-owned, no manual free needed)
+    # String fields: toDartString equivalent — just decode the pointer value
+    result &= "    _plain_cls = _struct_plain_types['" & sn & "']\n"
+    result &= "    _ct = _struct_types['" & sn & "'].from_address(ctypes.cast(r, ctypes.c_void_p).value)\n"
+    result &= "    _meta = _struct_field_meta['" & sn & "']\n"
+    result &= "    _kwargs = {}\n"
+    result &= "    for _fn, _ft in _ct._fields_:\n"
+    result &= "      _raw = getattr(_ct, _fn)\n"
+    result &= "      _kind, _extra = _meta.get(_fn, ('pod', None))\n"
+    result &= "      if _kind == 'string':\n"
+    result &= "        _kwargs[_fn] = ctypes.string_at(_raw).decode('utf-8') if _raw else None\n"
+    result &= "      elif _kind == 'struct':\n"
+    result &= "        _sv = _struct_view_types[_extra](ctypes.addressof(getattr(_ct, _fn)), owned=False)\n"
+    result &= "        _kwargs[_fn] = _struct_plain_types[_extra]._from_view(_sv)\n"
+    result &= "      else:\n"
+    result &= "        _kwargs[_fn] = _raw\n"
     result &= "    _lib.ocheFree(r)\n"
-    result &= "    return " & sn & "View(dst, owned=True)\n"
+    result &= "    return _plain_cls(**_kwargs)\n"
 
   elif enumBanks.hasKey(obj.retType.name):
     result &= "    return r\n"
@@ -367,8 +484,14 @@ proc genPythonPrelude*(): string =
   result &= "  t = _struct_types[name]\n"
   result &= "  if hasattr(obj, '_as_buffer'): return obj\n"
   result &= "  buf = t()\n"
+  result &= "  # XxxView — memcpy entire struct buffer directly (fast path)\n"
+  result &= "  if hasattr(obj, '_addr'):\n"
+  result &= "    ctypes.memmove(ctypes.addressof(buf), obj._addr, ctypes.sizeof(t))\n"
+  result &= "    return buf\n"
   result &= "  meta = _struct_field_meta.get(name, {})\n"
-  result &= "  for (k, v) in (obj.items() if hasattr(obj, 'items') else obj):\n"
+  result &= "  # Xxx plain class or dict — iterate fields\n"
+  result &= "  pairs = list(obj.items()) if hasattr(obj, 'items') else [(k, getattr(obj,k)) for k in getattr(obj, '__slots__', [])]\n"
+  result &= "  for (k, v) in pairs:\n"
   result &= "    kind, extra = meta.get(k, ('pod', None))\n"
   result &= "    if kind == 'struct':\n"
   result &= "      if v is None:\n"
@@ -390,6 +513,7 @@ proc genPythonPrelude*(): string =
   result &= "  return _struct_from_ctypes(name, _struct_types[name].from_address(addr))\n"
   result &= "\n"
   result &= "_struct_view_types: dict = {}\n"
+  result &= "_struct_plain_types: dict = {}\n"
   result &= "\n"
   result &= "def _struct_copy_view(name: str, ptr, offset: int, elem_size: int, index: int):\n"
   result &= "  src = ctypes.cast(ptr, ctypes.c_void_p).value + offset + index * elem_size\n"
@@ -397,6 +521,24 @@ proc genPythonPrelude*(): string =
   result &= "  ctypes.memmove(dst, src, elem_size)\n"
   result &= "  view_cls = _struct_view_types.get(name)\n"
   result &= "  return view_cls(dst, owned=True) if view_cls else None\n"
+  result &= "\n"
+  result &= "def _struct_unpack_plain(name: str, ptr, offset: int, elem_size: int, index: int):\n"
+  result &= "  addr = ctypes.cast(ptr, ctypes.c_void_p).value + offset + index * elem_size\n"
+  result &= "  ct = _struct_types[name].from_address(addr)\n"
+  result &= "  meta = _struct_field_meta[name]\n"
+  result &= "  plain_cls = _struct_plain_types[name]\n"
+  result &= "  kwargs = {}\n"
+  result &= "  for fn, _ in ct._fields_:\n"
+  result &= "    raw = getattr(ct, fn)\n"
+  result &= "    kind, extra = meta.get(fn, ('pod', None))\n"
+  result &= "    if kind == 'string':\n"
+  result &= "      kwargs[fn] = ctypes.string_at(raw).decode('utf-8') if raw else None\n"
+  result &= "    elif kind == 'struct':\n"
+  result &= "      sv = _struct_view_types[extra](ctypes.addressof(getattr(ct, fn)), owned=False)\n"
+  result &= "      kwargs[fn] = _struct_plain_types[extra]._from_view(sv)\n"
+  result &= "    else:\n"
+  result &= "      kwargs[fn] = raw\n"
+  result &= "  return plain_cls(**kwargs)\n"
   result &= "\n"
   result &= "def _struct_from_ctypes(name: str, c) -> dict:\n"
   result &= "  d = {}\n"
@@ -495,6 +637,7 @@ proc genPythonPrelude*(): string =
   result &= "      _lib.ocheFreeDeep(self._ptr)\n"
   result &= "      self._ptr = None\n"
   result &= "      self._n = 0\n"
+  result &= "  def __del__(self): self.free()  # GC safety net — explicit .free() preferred\n"
   result &= "  def __enter__(self): return self\n"
   result &= "  def __exit__(self, *_): self.free()\n"
   result &= "  def to_numpy(self):\n"

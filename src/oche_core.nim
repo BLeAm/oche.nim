@@ -7,6 +7,8 @@ type
     isSeq*: bool
     isOption*: bool
     isShared*: bool
+    isArray*: bool   ## OcheArray[T] — zero-copy view, caller owns buffer, Dart uses memcpy
+    isPtr*:  bool    ## OchePtr[T]   — true zero-copy raw pointer, caller manages lifetime
     inner*: string
   OcheField* = object
     name*: string
@@ -49,6 +51,10 @@ proc parseType*(node: NimNode): OcheType =
       return OcheType(name: node.repr, isOption: true, inner: node[1].repr)
     elif base == "OcheBuffer":
       return OcheType(name: node.repr, isShared: true, inner: node[1].repr)
+    elif base == "OcheArray":
+      return OcheType(name: node.repr, isArray: true, inner: node[1].repr)
+    elif base == "OchePtr":
+      return OcheType(name: node.repr, isPtr: true, inner: node[1].repr)
     return OcheType(name: node.repr)
   else:
     return OcheType(name: node.repr)
