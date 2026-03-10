@@ -19,3 +19,4 @@ libbench3.so
 *.pyo
 debug.txt
 dresult.txt 
+src/benchmark
