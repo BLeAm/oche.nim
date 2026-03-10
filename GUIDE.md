@@ -1,489 +1,686 @@
-# 🦅 Oche & Porche: Complete Guide
-
-> **Oche** (Dart) and **Porche** (Python) are revolutionary FFI systems that bridge **Nim** with high-level languages while maintaining **zero-copy performance** and **memory safety**. This guide covers everything from philosophy to advanced usage.
+# oche — Developer Guide
 
 ---
 
-## 📚 Table of Contents
+## Table of contents
 
-- [Philosophy & Architecture](#-philosophy--architecture)
-- [Installation & Setup](#-installation--setup)
-- [Basic Usage](#-basic-usage)
-- [Advanced Features](#-advanced-features)
-- [Memory Management](#-memory-management)
-- [Benchmarks](#-benchmarks)
-- [API Reference](#-api-reference)
-- [Troubleshooting](#-troubleshooting)
-
----
-
-## 🧠 Philosophy & Architecture
-
-### The Problem with Traditional FFI
-
-Traditional FFI approaches suffer from:
-- **Serialization Overhead**: JSON/binary conversion kills performance
-- **Memory Leaks**: Manual memory management is error-prone
-- **Ergonomic Issues**: Foreign objects don't feel native
-- **Safety Gaps**: Type mismatches and buffer overflows
-
-### Oche's Solution: Zero-Copy with Safety
-
-Oche/Porche solve these through:
-
-#### 1. **Unified Memory Layout**
-All data uses a single ABI: `[int64 length][int32 typeId][int32 flags][data...]`
-
-#### 2. **Split-Ownership Model**
-- **Snapshot Mode**: Nim creates data, target language owns and GC manages
-- **Shared Mode**: Nim retains ownership, target language can safely mutate
-
-#### 3. **Deep Analysis & Auto-Generation**
-Macros analyze your types and generate:
-- Memory-safe destructors
-- Zero-copy accessors
-- Type-safe bindings
-
-#### 4. **POD Optimization**
-Plain Old Data structs bypass expensive recursive cleanup.
+1. [Mental model](#1-mental-model)
+2. [Annotating types](#2-annotating-types)
+3. [Annotating procs](#3-annotating-procs)
+4. [Return modes in depth](#4-return-modes-in-depth)
+   - 4.1 [Copy mode — single struct](#41-copy-mode--single-struct)
+   - 4.2 [Copy mode — seq](#42-copy-mode--seq)
+   - 4.3 [View mode — seq](#43-view-mode--seq-nativelistview)
+   - 4.4 [Shared mode — OcheBuffer](#44-shared-mode--ochebuffer)
+   - 4.5 [Option](#45-option)
+   - 4.6 [Strings](#46-strings)
+   - 4.7 [Primitives and enums](#47-primitives-and-enums)
+5. [Input param types](#5-input-param-types)
+   - 5.1 [Struct params](#51-struct-params)
+   - 5.2 [seq params](#52-seq-params)
+   - 5.3 [OcheArray — fast array input](#53-ochearray--fast-array-input)
+   - 5.4 [OchePtr — true zero-copy input](#54-ocheptr--true-zero-copy-input)
+6. [T vs TView — the ownership split](#6-t-vs-tview--the-ownership-split)
+7. [Memory management rules](#7-memory-management-rules)
+8. [String fields](#8-string-fields)
+9. [Nested structs](#9-nested-structs)
+10. [Enums](#10-enums)
+11. [numpy / typed-data integration](#11-numpy--typed-data-integration)
+12. [Error handling](#12-error-handling)
+13. [Full example — benchmark harness](#13-full-example--benchmark-harness)
+14. [Generated file structure](#14-generated-file-structure)
 
 ---
 
-## 🛠️ Installation & Setup
+## 1. Mental model
 
-### Prerequisites
-- **Nim 2.0+** with ARC/ORC memory management
-- **Dart 3.0+** (for Oche) or **Python 3.8+** (for Porche)
-
-### Project Structure
 ```
-your_project/
-├── src/
-│   ├── main.nim          # Your Nim code with {.oche.}/{.porche.} annotations
-│   ├── oche.nim          # Oche library
-│   └── benchmark/        # Optional benchmarks
-├── libmain.so            # Compiled Nim library
-├── nlib.dart             # Generated Dart bindings
-└── nlib.py              # Generated Python bindings
+┌──────────────┐   {.oche, porche.}   ┌────────────────────────────┐
+│   mylib.nim  │  ──────────────────► │  compile-time IR (oche_core)│
+│  (your code) │                      └────────────┬───────────────┘
+└──────────────┘                                   │
+                                       ┌───────────┴───────────┐
+                                       ▼                       ▼
+                               generate()            generatePython()
+                               tlib.dart             tlib.py
 ```
 
-### Compilation
-```bash
-# Compile Nim library
-nim c --app:lib --out:libmain.so src/main.nim
+**Everything happens at Nim compile time.** No reflection, no runtime overhead. The generated files contain plain `ctypes` / `dart:ffi` code with no dependency on oche at runtime.
 
-# Generate bindings (called from main.nim)
-generate("nlib.dart")      # For Dart
-generatePython("nlib.py")  # For Python
+### Ownership: two worlds
+
 ```
+Nim RAM                          │  Python / Dart GC
+─────────────────────────────────┼──────────────────────────────
+OcheBuffer[T]  (Nim owns)        │  T  plain object  (GC owns)
+seq[T] view    (Nim owns)        │  TView (borrowed — do not outlive source)
+                                 │  NativeListView / SharedListView (managed)
+```
+
+The key rule: **`T` (plain class/object) is always safe to hold forever. `TView` must not outlive the Nim buffer it points into.**
 
 ---
 
-## 🎯 Basic Usage
-
-### Defining Types
+## 2. Annotating types
 
 ```nim
-import oche  # or porche
-
-# Enums work automatically
-type Status {.oche.} = enum  # {.porche.} for Python
-  Active, Inactive, Pending
-
-# Structs with automatic memory analysis
-type User {.oche.} = object
-  id: int
-  name: string          # Strings are safely managed
-  status: Status
-  tags: seq[string]     # Sequences work too
-
+# Dart only
 type Point {.oche.} = object
-  x, y: float           # POD structs are optimized
+  x, y: float64
+
+# Dart + Python
+type User {.oche, porche.} = object
+  name: string    # string fields are handled automatically
+  age:  int
 ```
 
-### Defining Functions
+### Supported field types
+
+| Nim field type | Python | Dart |
+|---|---|---|
+| `int` / `int64` | `int` | `int` |
+| `float` / `float64` | `float` | `double` |
+| `float32` | `float` | `double` |
+| `uint8` | `int` | `int` |
+| `bool` | `bool` | `bool` |
+| `string` | `str` (nullable) | `String` |
+| Another `{.oche.}` struct | nested plain object | nested class |
+| `{.oche.}` enum | `int` | enum class |
+
+---
+
+## 3. Annotating procs
 
 ```nim
-# Basic function
-proc greet(name: string): string {.oche.} =
+# Dart only, copy mode
+proc makePoint(x, y: float64): Point {.oche.} = Point(x: x, y: y)
+
+# Both, copy mode
+proc initUser(name: string, age: int): User {.oche, porche.} =
+  User(name: name.toOcheStr, age: age)
+
+# Both, view / zero-copy mode (for seq and OcheBuffer returns)
+proc getUsers(): seq[User] {.oche: view, porche: view.} = myGlobalSeq
+
+# Generate at end of file
+generate("tlib.dart")
+generatePython("tlib.py")
+```
+
+`toOcheStr` copies a Nim managed string into an unmanaged C heap string that oche can hand off safely across the FFI boundary.
+
+---
+
+## 4. Return modes in depth
+
+### 4.1 Copy mode — single struct
+
+```nim
+proc initUser(name: string, age: int): User {.oche, porche.} =
+  User(name: name.toOcheStr, age: age)
+```
+
+| | Python | Dart |
+|---|---|---|
+| Returned type | `User` plain object | `User` class |
+| Ownership | Python / Dart GC | Python / Dart GC |
+| Mutable | ✅ | ✅ |
+| Free | automatic | automatic |
+
+```python
+u = porche.initUser("Alice", 30)
+u.name = "Bob"    # mutable — Dart string, no ocheStr* involved
+u.age  = 31
+print(u)          # User(name='Bob', age=31)
+```
+
+```dart
+final u = oche.initUser("Alice", 30);
+u.name = "Bob";
+u.age  = 31;
+```
+
+> **Note:** `{.porche: view.}` on a single struct return is silently ignored and falls back to copy mode. A Nim proc that returns a struct by value gives you a stack copy — there is no persistent buffer to borrow from.
+
+---
+
+### 4.2 Copy mode — seq
+
+```nim
+proc listUsers(): seq[User] {.oche, porche.} =
+  @[User(name: "a".toOcheStr, age: 1), User(name: "b".toOcheStr, age: 2)]
+```
+
+Returns a fully copied `List[User]` / `List<User>`. Every element is unpacked from Nim RAM into a GC-owned object before the Nim allocation is freed.
+
+```python
+users = porche.listUsers()   # List[User]
+users[0].name = "changed"    # safe — fully GC-owned
+```
+
+---
+
+### 4.3 View mode — seq (`NativeListView`)
+
+```nim
+var cache: seq[User]   # global — must outlive the view
+
+proc getCachedUsers(): seq[User] {.oche: view, porche: view.} =
+  cache
+```
+
+| | Python | Dart |
+|---|---|---|
+| Returned type | `NativeListView` | `NativeListView<UserView>` |
+| Element type | `UserView` (borrowed) | `UserView` (borrowed) |
+| Mutable | ❌ read-only | ❌ read-only |
+| Free | GC finalizer (auto) | GC `Finalizer` (auto) |
+
+```python
+view = porche.getCachedUsers()
+u = view[0]           # UserView — zero-copy window into Nim RAM
+print(u.name)         # read
+u2 = u.freeze()       # copy out → User plain object, safe to keep
+view.to_numpy()       # POD structs only — returns numpy structured array
+```
+
+```dart
+final view = oche.getCachedUsers();
+final u = view[0];         // UserView
+print(u.name);             // read
+final u2 = u.freeze();     // copy out → User, safe to keep
+```
+
+**⚠️ Never store a `UserView` beyond the lifetime of its parent `NativeListView`.**
+
+---
+
+### 4.4 Shared mode — OcheBuffer
+
+```nim
+var buf: OcheBuffer[User]   # global — Nim owns this memory
+
+proc initUserBuffer(n: int): OcheBuffer[User] {.oche, porche.} =
+  buf = newOche[User](n)
+  return buf
+```
+
+| | Python | Dart |
+|---|---|---|
+| Returned type | `SharedListView` | `SharedListView<UserView>` |
+| Element type | `UserView` (borrowed) | `UserView` (borrowed) |
+| Mutable | ✅ read-write | ✅ read-write |
+| Free | **`.free()` required** | **`.free()` required** |
+
+```python
+# Explicit free
+buf = porche.initUserBuffer(10)
+buf[0].name = "Alice"
+buf.free()
+
+# Context manager (preferred)
+with porche.initUserBuffer(10) as buf:
+    buf[0].name = "Alice"
+    arr = buf.to_numpy()   # zero-copy numpy view (POD structs only)
+# auto-freed on exit
+```
+
+```dart
+final buf = oche.initUserBuffer(10);
+buf[0].name = "Alice";
+buf.free();   // must call manually — no context manager in Dart
+```
+
+**When to use `OcheBuffer` vs `seq` view:**
+- `OcheBuffer` — when Nim needs to keep the buffer alive across multiple calls (e.g. audio buffer, simulation state).
+- `seq` view — when you just want to expose an existing Nim seq cheaply.
+
+---
+
+### 4.5 Option
+
+```nim
+proc findUser(id: int): Option[User] {.oche, porche.} =
+  if id == 1: some(User(name: "Alice".toOcheStr, age: 30))
+  else: none(User)
+```
+
+```python
+u = porche.findUser(1)   # User | None
+u = porche.findUser(99)  # None
+```
+
+```dart
+final u = oche.findUser(1);   // User?
+```
+
+---
+
+### 4.6 Strings
+
+```nim
+proc greet(name: string): string {.oche, porche.} =
   "Hello, " & name
-
-# Complex return types
-proc createUser(id: int): User {.oche.} =
-  User(
-    id: id,
-    name: "User_" & $id,
-    status: Active,
-    tags: @["new"]
-  )
-
-# Shared buffers (live mutation)
-proc getUsers(): OcheBuffer[User] {.oche.} =
-  newOche[User](100)  # Creates shared buffer
-
-# Options/Nullables
-proc findUser(id: int): Option[User] {.oche.} =
-  if id == 42:
-    some(User(id: 42, name: "Admin"))
-  else:
-    none(User)
 ```
 
-### Dart Usage
+Returned strings are copied to GC memory and Nim's allocation is freed immediately. No manual management needed.
 
-```dart
-import 'nlib.dart';
+---
 
-void main() async {
-  // Basic calls
-  final greeting = await oche.greet("World");
-  print(greeting);  // "Hello, World"
+### 4.7 Primitives and enums
 
-  // Struct handling
-  final user = await oche.createUser(42);
-  print('User: ${user.name}');  // "User: User_42"
+```nim
+proc add(a, b: int): int {.oche, porche.} = a + b
 
-  // Shared buffers
-  final users = await oche.getUsers();
-  users[0] = User(name: "Modified", status: Status.active);
-
-  // Options
-  final maybeUser = await oche.findUser(42);
-  if (maybeUser != null) {
-    print('Found: ${maybeUser.name}');
-  }
-}
+type Color {.oche, porche.} = enum Red, Green, Blue
+proc getColor(): Color {.oche, porche.} = Green
 ```
 
-### Python Usage
+Primitives pass by value. Enums marshal as `int32` on the wire and are reconstructed as the enum type on the receiving side.
+
+---
+
+## 5. Input param types
+
+### 5.1 Struct params
+
+Functions accepting a struct param accept **both** the plain class and the view:
 
 ```python
-import nlib
+u1 = porche.initUser("Alice", 30)   # User plain
+buf = porche.initUserBuffer(1)
+u2 = buf[0]                         # UserView
 
-# Basic calls
-greeting = nlib.porche.greet("World")
-print(greeting)  # "Hello, World"
+porche.printUser(u1)   # ✅ User
+porche.printUser(u2)   # ✅ UserView — both work
+```
 
-# Struct handling
-user = nlib.porche.createUser(42)
-print(f'User: {user["name"]}')  # "User: User_42"
+```dart
+oche.printUser(u);    // User or UserView — both accepted
+```
 
-# Shared buffers
-users = nlib.porche.getUsers()
-users[0] = {"name": "Modified", "status": 0}  # Safe mutation
+Internally oche packs the struct into a temporary C struct for the call.
 
-# Options
-maybe_user = nlib.porche.findUser(42)
-if maybe_user is not None:
-    print(f'Found: {maybe_user["name"]}')
+---
 
-# NumPy integration
+### 5.2 seq params
+
+```nim
+proc sum(values: seq[int]): int {.oche, porche.} =
+  values.foldl(a + b, 0)
+```
+
+The list is copied element-by-element into a temporary C array. Fine for moderate sizes. For large arrays, prefer `OcheArray` or `OchePtr`.
+
+---
+
+### 5.3 OcheArray — fast array input
+
+```nim
+proc muliTwoFast(list: OcheArray[int]): OcheBuffer[int] {.oche, porche.} =
+  let out = newOche[int](list.len)
+  for i in 0..<list.len: out[i] = list[i] * 2
+  return out
+```
+
+| Language | Accepts | Transfer |
+|---|---|---|
+| Python | `numpy` array or `array.array` | zero-copy (pointer + len) |
+| Dart | `Int64List` / `Float64List` | 1× `memcpy` via `setAll` |
+
+```python
 import numpy as np
-points = nlib.porche.getPoints()
-arr = points.to_numpy()  # Zero-copy NumPy array
+narr = np.array(range(1_000_000), dtype=np.int64)
+result = porche.muliTwoFast(narr)   # zero-copy input, SharedListView output
+```
+
+```dart
+final narr = Int64List.fromList(bulk);
+final result = oche.muliTwoFast(narr);   // 1× memcpy input
 ```
 
 ---
 
-## 🔧 Advanced Features
-
-### Memory Views vs Copies
+### 5.4 OchePtr — true zero-copy input
 
 ```nim
-# View: Zero-copy read-only access
-proc getUsersView(): seq[User] {.oche.} =
-  # Returns view, memory managed by Dart GC
-
-# Copy: Data ownership transfer
-proc getUsersCopy(): seq[User] {.oche.} =
-  # Returns copy, Nim can free immediately
-
-# Shared: Live mutation capability
-proc getUsersShared(): OcheBuffer[User] {.oche.} =
-  # Returns shared buffer for mutation
+proc muliTwoPtr(list: OchePtr[int]): OcheBuffer[int] {.oche, porche.} =
+  let out = newOche[int](list.len)
+  for i in 0..<list.len: out[i] = list[i] * 2
+  return out
 ```
 
-### Custom String Handling
+| Language | Accepts | Transfer |
+|---|---|---|
+| Python | `numpy` array, `array.array`, or raw ctypes pointer | zero-copy |
+| Dart | `ffi.Pointer<Int64>` (calloc / malloc) | **zero-copy — no staging at all** |
 
-```nim
-# Use toOcheStr for strings that persist
-var globalName = toOcheStr("Persistent")
-
-proc getGlobalName(): string {.oche.} =
-  $globalName  # Safe string return
-```
-
-### Error Handling
-
-```nim
-proc riskyOperation(): string {.oche.} =
-  if rand(1.0) < 0.1:
-    raise newException(ValueError, "Random failure")
-  "Success"
+```python
+result = porche.muliTwoPtr(narr)   # zero-copy both directions
 ```
 
 ```dart
-// Dart catches Nim exceptions
-try {
-  final result = await oche.riskyOperation();
-} catch (e) {
-  print('Nim error: $e');
-}
+// Persistent buffer — allocate once, reuse many times
+final buf = calloc<Int64>(n);
+for (var i = 0; i < n; i++) buf[i] = i;
+final result = oche.muliTwoPtr(buf, n);
+calloc.free(buf);
+```
+
+**Use `OchePtr` when:**
+- You have a long-lived native buffer (audio pipeline, video frame, sensor stream).
+- You want to avoid even a single staging copy.
+
+---
+
+## 6. T vs TView — the ownership split
+
+Every exported struct generates **two** representations:
+
+| | `User` | `UserView` |
+|---|---|---|
+| Lives in | Python / Dart GC heap | **Nim RAM** (borrowed) |
+| Fields | mutable Python/Dart values | mutable windows into Nim RAM |
+| String setter | replaces Dart string | `ocheStrFree` + `ocheStrAlloc` |
+| Lifetime | forever (GC) | tied to parent buffer |
+| `freeze()` | — | copies into `User` |
+| Used in | single return, seq copy | seq view, OcheBuffer |
+
+```python
+# TView → T via freeze()
+view = porche.getCachedUsers()
+u = view[0].freeze()   # safe to keep after view is gone
+```
+
+```dart
+final u = view[0].freeze();   // User — GC-owned
+```
+
+---
+
+## 7. Memory management rules
+
+| Type | Python | Dart |
+|---|---|---|
+| `T` plain / `User` | GC automatic | GC automatic |
+| `List[T]` copy | GC automatic | GC automatic |
+| `NativeListView` | GC finalizer (auto) | GC `Finalizer` (auto) |
+| `SharedListView` | **`.free()`** or `with` block | **`.free()`** |
+| `TView` element from `SharedListView` | never free individually | never free individually |
+| string field setter on `TView` | oche handles `ocheStrFree`/`ocheStrAlloc` | oche handles `_ocheStrFree`/`_ocheStrAlloc` |
+
+**Python convenience — context manager:**
+```python
+with porche.initUserBuffer(100) as buf:
+    process(buf)
+# automatically freed
+```
+
+**Dart — manual only:**
+```dart
+final buf = oche.initUserBuffer(100);
+try { process(buf); } finally { buf.free(); }
+```
+
+---
+
+## 8. String fields
+
+String fields in structs require careful handling across the FFI boundary. oche manages this automatically:
+
+- **Nim side:** use `toOcheStr` to convert a Nim GC string to a `cstring` on the unmanaged heap.
+- **Getter:** reads the C pointer lazily and decodes UTF-8.
+- **Setter on `TView`:** calls `ocheStrFree` on the old pointer, allocates a new one with `ocheStrAlloc`.
+- **Setter on `T` (plain):** standard Python/Dart string assignment — no C heap involved.
+- **`freeze()`:** calls `toDartString()` / `decode('utf-8')` to produce a GC-owned string copy.
+- **`__del__` / destructor on owned `TView`:** frees all string fields before freeing the struct buffer.
+
+```nim
+type Person {.oche, porche.} = object
+  first, last: string
+
+proc makePerson(f, l: string): Person {.oche, porche.} =
+  Person(first: f.toOcheStr, last: l.toOcheStr)
 ```
 
 ```python
-# Python catches Nim exceptions
+p = porche.makePerson("John", "Doe")
+p.first = "Jane"   # plain Dart string reassignment — no leak
+```
+
+---
+
+## 9. Nested structs
+
+```nim
+type
+  Address {.oche, porche.} = object
+    city: string
+
+  Person {.oche, porche.} = object
+    name: string
+    addr: Address
+```
+
+Nested structs are embedded inline (not as pointers) in the C struct layout. Accessors return a `AddressView` that points into the parent struct's memory — the parent owns it.
+
+```python
+p = porche.makePerson(...)
+print(p.addr.city)   # AddressView — reads from embedded memory
+city_copy = p.addr.city  # str — GC-owned copy via property getter
+```
+
+---
+
+## 10. Enums
+
+```nim
+type Status {.oche, porche.} = enum
+  Pending, Active, Closed
+
+proc getStatus(): Status {.oche, porche.} = Active
+```
+
+```python
+s = porche.getStatus()   # int (0 / 1 / 2)
+print(s == porche.Status.Active)  # True
+```
+
+```dart
+final s = oche.getStatus();   // Status enum
+print(s == Status.Active);    // true
+```
+
+---
+
+## 11. numpy / typed-data integration
+
+### NativeListView.to_numpy() — read-only copy
+
+```python
+view = porche.getCachedInts()    # NativeListView
+arr = view.to_numpy()            # numpy array — copy (Nim may free anytime)
+```
+
+### SharedListView.to_numpy() — zero-copy writable view
+
+```python
+with porche.getBuffer() as buf:
+    arr = buf.to_numpy()         # zero-copy view into Nim RAM
+    arr *= 2                     # modifies Nim memory directly
+```
+
+`to_numpy()` returns `None` for non-POD structs (i.e. structs with string fields).
+
+### Dart typed data
+
+```dart
+// NativeListView<int> from seq[int] {.view.}
+final list = oche.getInts();
+// standard List iteration — no special numpy equivalent
+for (final v in list) print(v);
+```
+
+---
+
+## 12. Error handling
+
+If a Nim proc raises an exception, oche catches it, stores the message, and re-raises it on the calling side:
+
+```python
 try:
-    result = nlib.porche.riskyOperation()
+    result = porche.riskyOp()
 except RuntimeError as e:
-    print(f'Nim error: {e}')
+    print(e)   # "NimError: ..."
 ```
-
----
-
-## 🧠 Memory Management Deep Dive
-
-### Ownership Models
-
-#### Snapshot Mode (Default)
-```nim
-proc getData(): seq[int] {.oche.} =
-  @[1, 2, 3]  # Nim allocates, transfers ownership to target
-```
-- Nim allocates memory
-- Target language receives ownership
-- Automatic cleanup via GC finalizers
-
-#### Shared Mode
-```nim
-var buffer: OcheBuffer[int]
-
-proc initBuffer(): OcheBuffer[int] {.oche.} =
-  buffer = newOche[int](1000)
-  buffer
-
-proc modifyBuffer() {.oche.} =
-  buffer[0] = 42  # Safe mutation
-```
-- Nim retains ownership
-- Target can mutate safely
-- Manual cleanup required
-
-### POD vs Complex Types
-
-```nim
-type Simple {.oche.} = object
-  x, y: int  # POD: O(1) cleanup
-
-type Complex {.oche.} = object
-  name: string  # Not POD: O(N) recursive cleanup
-```
-
-### Memory Layout
-
-```
-Buffer Layout:
-┌─────────────┬─────────────┬─────────────┬─────────────────┐
-│   int64     │   int32     │   int32     │     data...     │
-│   length    │   typeId    │   flags     │                 │
-└─────────────┴─────────────┴─────────────┴─────────────────┘
-```
-
----
-
-## 📊 Benchmarks
-
-### Methodology
-We benchmark CPU-intensive tasks comparing:
-- **Pure Target**: Native implementation
-- **Nim+Oche/Porche**: FFI overhead included
-
-### Results Summary
-
-#### Dart (Oche)
-| Benchmark | Pure Dart | Nim+Oche | Speedup |
-|-----------|-----------|----------|---------|
-| Monte Carlo Pi | 450ms | 380ms | 1.18x |
-| Mandelbrot | 1250ms | 980ms | 1.28x |
-| N-Body | 890ms | 720ms | 1.24x |
-
-#### Python (Porche)
-| Benchmark | Pure Python | Nim+Porche | Speedup |
-|-----------|-------------|------------|---------|
-| Monte Carlo Pi (10M) | 0.96s | 1.51s | 0.64x |
-| Mandelbrot (1000x1000) | 17.26s | 1.13s | 15.22x |
-
-*Dart results on M1 MacBook Pro, Python on Linux x64, 10M iterations*
-
-### Running Benchmarks
-
-```bash
-# Dart benchmarks
-cd src/benchmark
-dart bench.dart
-
-# Python benchmarks
-python3 src/benchmark/bench_py.py
-```
-
----
-
-## 📖 API Reference
-
-### Nim Annotations
-
-#### `{.oche.}` / `{.porche.}`
-Marks types/functions for export.
-
-#### `toOcheStr(s: string)`
-Creates persistent strings.
-
-#### `newOche[T](n: int)`
-Creates shared buffers.
-
-### Generated APIs
-
-#### Dart
-- `oche.functionName(args)` - Async function calls
-- `SharedListView<T>` - Mutable shared buffers
-- `NativeListView<T>` - Read-only views
-
-#### Python
-- `porche.functionName(args)` - Function calls
-- `_SharedView` - Mutable shared buffers with NumPy support
-
----
-
-## 🔍 Troubleshooting
-
-### Common Issues
-
-#### "Library not found"
-- Ensure `libmain.so` is in the same directory
-- Check library naming (`libmain.dll` on Windows)
-
-#### Memory Errors
-- Use `toOcheStr()` for persistent strings
-- Avoid returning stack-allocated data
-
-#### Type Mismatches
-- Ensure Nim and target types match exactly
-- Check generated bindings for type conversions
-
-### Debug Mode
-```bash
-# Compile with debug info
-nim c --app:lib --debuginfo src/main.nim
-```
-
----
-
-## 🎯 Best Practices
-
-1. **Use Shared Buffers for Large Data**: Zero-copy access
-2. **POD Types for Performance**: Bypass expensive cleanup
-3. **Error Handling**: Always wrap FFI calls in try-catch
-4. **String Management**: Use `toOcheStr()` for persistence
-5. **Type Consistency**: Keep Nim and target type definitions in sync
-
----
-
-## 🚀 Advanced Topics
-
-### Custom Type Mappings
-Override default type conversions by modifying emitter code.
-
-### Extending the System
-Add new target languages by implementing emitter modules.
-
-### Performance Tuning
-- Use POD types when possible
-- Minimize cross-language calls
-- Batch operations where feasible
-
----
-
-## 🤝 Contributing
-
-We welcome contributions! Areas of interest:
-- New target language support
-- Performance optimizations
-- Documentation improvements
-- Benchmark expansions
-
----
-
-## 📄 License
-
-MIT License - see project root for details.
-
-### 3. Enums (Type-safe)
-เชื่อมต่อ Enum ของ Nim เข้ากับ Enum ของ Dart โดยตรง
-
-```nim
-type 
-  Status {.oche.} = enum
-    Active, Inactive
-
-proc getStatus(): Status {.oche.} = Active
-```
-
-### 4. Optional / Nullability (New!)
-รองรับ `Option[T]` จาก Nim ให้กลายเป็น `T?` ใน Dart
-
-```nim
-import std/options
-
-proc findValue(key: string): Option[int] {.oche.} =
-  if key == "secret": some(42)
-  else: none(int)
-```
-
-### 5. Multi-threading (Async Support)
-ฟังก์ชันที่ถูก gen จะมีเวอร์ชัน `Async` เสมอ เพื่อไม่ให้ UI ค้าง
 
 ```dart
-// ใน Dart
-final result = await findValueAsync("secret"); // รันใน Isolate อื่นอัตโนมัติ
-```
-
-### 6. Robust Error Handling
-หาก Nim เกิด Error, Dart จะได้รับเป็น `Exception`
-
-```nim
-proc dangerZone() {.oche.} =
-  raise newException(ValueError, "Something went wrong in Nim!")
-```
-```dart
-// ใน Dart
 try {
-  dangerZone();
+  final result = oche.riskyOp();
 } catch (e) {
-  print(e); // Output: Exception: NimError: Something went wrong in Nim!
+  print(e);   // Exception: NimError: ...
 }
 ```
 
----
-
-## 💡 Performance Optimization Tips
-
-- **Zero-copy for Lists:** สำหรับ `seq[T]` Oche ใช้ `asTypedList` ใน Dart ซึ่งเป็นการเข้าถึงหน่วยความจำก้อนเดียวกับ Nim โดยตรง (ไม่มีการ Copy ข้อมูลใหญ่ๆ)
-- **Release Build:** เมื่อใช้งานจริง อย่าลืม Compile Nim ด้วย `-d:release` เพื่อความเร็วสูงสุด
-- **Arena Allocation:** Oche ใช้ `using((arena) { ... })` ใน Dart เพื่อจัดการหน่วยความจำชั่วคราวอย่างมีประสิทธิภาพ
+On the Nim side, no special annotation is needed — all exported procs are automatically wrapped.
 
 ---
 
-## 🛠️ How to Compile
+## 13. Full example — benchmark harness
 
-1. **Compile Nim:**
-   ```bash
-   nim c --app:lib --out:libmain.so main.nim
-   ```
-2. **Run Dart:**
-   ```bash
-   dart main.dart
-   ```
+The following mirrors the `toc2.nim` / `toc.py` / `toc.dart` benchmark that ships with oche.
+
+**Nim (`toc2.nim`)**
+```nim
+import oche
+
+var intBuffer: OcheBuffer[int]
+
+proc muliTwo(list: seq[int]): OcheBuffer[int] {.oche, porche.} =
+  intBuffer = newOche[int](list.len)
+  for i in 0..<list.len: intBuffer[i] = list[i] * 2
+  return intBuffer
+
+proc muliTwoFast(list: OcheArray[int]): OcheBuffer[int] {.oche, porche.} =
+  intBuffer = newOche[int](list.len)
+  for i in 0..<list.len: intBuffer[i] = list[i] * 2
+  return intBuffer
+
+proc muliTwoPtr(list: OchePtr[int]): OcheBuffer[int] {.oche, porche.} =
+  intBuffer = newOche[int](list.len)
+  for i in 0..<list.len: intBuffer[i] = list[i] * 2
+  return intBuffer
+
+generate("tlib.dart")
+generatePython("tlib.py")
+```
+
+**Python (`toc.py`)**
+```python
+from tlib import porche
+import numpy as np
+
+bulk = list(range(10_000_000))
+narr = np.array(bulk, dtype=np.int64)
+
+# seq path — copies list into C array
+result = porche.muliTwo(bulk)
+
+# OcheArray path — zero-copy from numpy (pointer + len directly to Nim)
+result = porche.muliTwoFast(narr)
+
+# OchePtr path — zero-copy, same as OcheArray for numpy
+result = porche.muliTwoPtr(narr)
+```
+
+**Dart (`toc.dart`)**
+```dart
+import 'dart:ffi';
+import 'dart:typed_data';
+import 'package:ffi/ffi.dart';
+import 'tlib.dart';
+
+final bulk = List.generate(10000000, (i) => i);
+
+// seq path — element-by-element copy
+final r1 = oche.muliTwo(bulk);
+
+// OcheArray path — 1× memcpy via setAll
+final narr = Int64List.fromList(bulk);
+final r2 = oche.muliTwoFast(narr);
+
+// OchePtr path — true zero-copy, caller manages native buffer
+final buf = calloc<Int64>(10000000);
+for (var i = 0; i < 10000000; i++) buf[i] = i;
+final r3 = oche.muliTwoPtr(buf, 10000000);
+calloc.free(buf);
+```
 
 ---
 
-**Oche: Bridging the gap between Nim's power and Dart's elegance.**
+## 14. Generated file structure
+
+Both `tlib.py` and `tlib.dart` are self-contained. Here is a map of what gets generated:
+
+### Python (`tlib.py`)
+
+```
+_struct_types        # {name: ctypes Structure class}
+_struct_field_meta   # {name: {field: (kind, extra)}}
+_struct_view_types   # {name: XxxView class}
+_struct_plain_types  # {name: Xxx plain class}
+_OFF_Xxx_field       # byte offsets for each field
+
+class XxxView         # zero-copy view — fields are direct memory reads/writes
+  .freeze()           # → Xxx (GC-owned deep copy)
+  .__del__()          # frees strings then buffer if owned
+
+class Xxx             # GC-owned plain class — mutable Python object
+  ._from_view(v)      # static: construct from XxxView
+
+class Porche          # all exported procs as methods
+  .funcName(...)
+
+porche = Porche()     # singleton
+
+class NativeListView  # seq view — read-only, auto-freed by finalizer
+  .__getitem__        # returns XxxView (zero-copy)
+  .to_list()          # → List[Xxx] (copy)
+  .to_numpy()         # → numpy array (copy for structs, view for primitives)
+
+class SharedListView  # OcheBuffer — read-write, Nim owns
+  .__getitem__        # returns XxxView (zero-copy)
+  .__setitem__        # accepts Xxx or XxxView
+  .to_numpy()         # zero-copy writable numpy view (POD only)
+  .free()             # release Nim buffer
+  .__enter__/__exit__ # context manager
+```
+
+### Dart (`tlib.dart`)
+
+```
+final class NXxx extends ffi.Struct   # C struct layout
+
+extension type XxxView(NXxx _ref)     # zero-copy view
+  .fieldName getter/setter
+  .freeze()   → Xxx
+  ._packInto(Pointer<NXxx>)
+
+class Xxx                             # GC-owned mutable class
+  .fieldName (mutable)
+  ._pack / ._packManual / ._unpack
+
+class Oche                            # all exported procs as methods
+  .funcName(...)
+
+final oche = Oche()                   # singleton
+
+class NativeListView<T>               # seq view — read-only, Finalizer auto-frees
+  .operator []   → TView (zero-copy)
+  .free()        # eager release
+
+class SharedListView<T>               # OcheBuffer — read-write, Nim owns
+  .operator []   → TView (zero-copy)
+  .operator []=  # accepts T or TView
+  .free()        # must call manually
+```
