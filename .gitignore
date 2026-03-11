@@ -20,3 +20,4 @@ libbench3.so
 debug.txt
 dresult.txt 
 src/benchmark
+py_result.txt
