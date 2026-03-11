@@ -126,6 +126,8 @@ proc genDStruct*(s: OcheStruct): string =
       freezeLines.add "      " & f.name & ": (_ref." & f.name & ".address == 0) ? \'\' : _ref." & f.name & ".toDartString(),"
     elif structBanks.hasKey(f.typ.name):
       freezeLines.add "      " & f.name & ": " & f.typ.name & "View(_ref." & f.name & ").freeze(),"
+    elif enumBanks.hasKey(f.typ.name):
+      freezeLines.add "      " & f.name & ": " & f.typ.name & ".values[_ref." & f.name & "],"
     else:
       freezeLines.add "      " & f.name & ": _ref." & f.name & ","
   extType &= "  " & s.name & " freeze() => " & s.name & "(\n" & freezeLines.join("\n") & "\n    );\n}\n"
@@ -186,6 +188,15 @@ proc genDInterface*(obj: OcheObject): string =
       nativeParams.add "ffi.Pointer<" & nT & ">, ffi.Int64"
       dartFfiParams.add "ffi.Pointer<" & nT & ">, int"
       callArgs.add pN & ", " & pN & "_len"
+    elif p.typ.isShared:
+      # OcheBuffer[T] as input — wire: single void* (the buffer header pointer already in Nim RAM)
+      # Dart passes the _nativePtr of a SharedListView directly — no copy, no arena.
+      let iI = p.typ.inner
+      let innerV = if structBanks.hasKey(iI): iI & "View" else: toDartType(iI)
+      wrapperParams[wrapperParams.len - 1] = "final SharedListView<" & innerV & "> " & pN
+      nativeParams.add "ffi.Pointer<ffi.Void>"
+      dartFfiParams.add "ffi.Pointer<ffi.Void>"
+      callArgs.add pN & "._nativePtr"
     elif structBanks.hasKey(p.typ.name):
       needsArena = true
       nativeParams.add "ffi.Pointer<N" & p.typ.name & ">"
@@ -198,7 +209,7 @@ proc genDInterface*(obj: OcheObject): string =
     else:
       let nT = toNativeType(p.typ.name)
       nativeParams.add nT
-      dartFfiParams.add (if nT.contains("Int") or nT.contains("Double") or nT.contains("Bool"): toDartType(p.typ.name) else: nT)
+      dartFfiParams.add (if enumBanks.hasKey(p.typ.name): "int" elif nT.contains("Int") or nT.contains("Double") or nT.contains("Bool"): toDartType(p.typ.name) else: nT)
       if p.typ.name in ["string", "cstring"]:
          needsArena = true
          callArgs.add pN & ".toNativeUtf8(allocator: alloc)"
@@ -227,7 +238,7 @@ proc genDInterface*(obj: OcheObject): string =
       discard  # actualRetType stays as dT_ret = "User"
   # copy mode single struct: actualRetType stays as dT_ret = "User" (Dart class)
 
-  let dR = if sR: nR else: (if isVoid: "void" else: (if nR.contains("Int") or nR.contains("Double") or nR.contains("Bool"): dT_ret else: nR))
+  let dR = if sR: nR else: (if isVoid: "void" elif enumBanks.hasKey(obj.retType.name): "int" else: (if nR.contains("Int") or nR.contains("Double") or nR.contains("Bool"): dT_ret else: nR))
 
   var body: string
   if obj.retType.isShared:

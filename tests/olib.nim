@@ -1,0 +1,215 @@
+## olib.nim — Comprehensive oche feature test library
+## Tests: copy/view/share modes, structs, nested structs, enums,
+##        strings, Option, primitives, seq, OcheArray, OchePtr,
+##        OcheBuffer as input param, mutation, freeze, error handling.
+import oche
+import std/options
+
+# ─── Enums ────────────────────────────────────────────────────────────────────
+
+type
+  Color {.oche, porche.} = enum
+    Red, Green, Blue
+
+  Status {.oche, porche.} = enum
+    Pending, Active, Closed
+
+# ─── Structs ─────────────────────────────────────────────────────────────────
+
+type
+  Point {.oche, porche.} = object
+    x: float64
+    y: float64
+
+  # POD struct with enum field
+  Particle {.oche, porche.} = object
+    x: float64
+    y: float64
+    mass: float64
+    color: Color
+
+  # Non-POD struct (has string)
+  User {.oche, porche.} = object
+    name: string
+    age:  int
+    status: Status
+
+  # Nested struct (inline)
+  Tagged {.oche, porche.} = object
+    point: Point
+    label: string
+
+# ─── Globals (for view/share modes) ──────────────────────────────────────────
+
+var gPoints: seq[Point]
+var gUsers: seq[User]
+var gBuf: OcheBuffer[int]
+var gParticleBuf: OcheBuffer[Particle]
+var gUserBuf: OcheBuffer[User]
+
+# ─── Copy mode procs ──────────────────────────────────────────────────────────
+
+proc makePoint(x, y: float64): Point {.oche, porche.} =
+  Point(x: x, y: y)
+
+proc makeUser(name: string, age: int): User {.oche, porche.} =
+  User(name: name.toOcheStr, age: age, status: Active)
+
+proc makeTagged(label: string, x, y: float64): Tagged {.oche, porche.} =
+  Tagged(point: Point(x: x, y: y), label: label.toOcheStr)
+
+proc makeParticle(x, y, mass: float64, color: Color): Particle {.oche, porche.} =
+  Particle(x: x, y: y, mass: mass, color: color)
+
+proc getColor(): Color {.oche, porche.} = Green
+
+proc getStatus(u: User): Status {.oche, porche.} =
+  u.status
+
+proc addPoints(a, b: Point): Point {.oche, porche.} =
+  Point(x: a.x + b.x, y: a.y + b.y)
+
+proc greetUser(u: User): string {.oche, porche.} =
+  "Hello, " & $u.name & "! Age: " & $u.age
+
+# ─── Option procs ─────────────────────────────────────────────────────────────
+
+proc maybePoint(give: bool): Option[Point] {.oche, porche.} =
+  if give: some(Point(x: 1.5, y: 2.5)) else: none(Point)
+
+proc maybeUser(name: string): Option[User] {.oche, porche.} =
+  if name.len > 0:
+    some(User(name: name.toOcheStr, age: 99, status: Active))
+  else:
+    none(User)
+
+# ─── Primitive procs ──────────────────────────────────────────────────────────
+
+proc addInts(a, b: int): int {.oche, porche.} = a + b
+
+proc mulFloat(a, b: float64): float64 {.oche, porche.} = a * b
+
+proc echoStr(s: string): string {.oche, porche.} = "echo: " & s
+
+proc sumSeq(values: seq[int]): int {.oche, porche.} =
+  var total = 0
+  for v in values: total += v
+  return total
+
+# ─── seq copy mode ────────────────────────────────────────────────────────────
+
+proc makePointList(n: int): seq[Point] {.oche, porche.} =
+  result = newSeq[Point](n)
+  for i in 0..<n:
+    result[i] = Point(x: float64(i), y: float64(i) * 2.0)
+
+proc makeUserList(n: int): seq[User] {.oche, porche.} =
+  result = newSeq[User](n)
+  for i in 0..<n:
+    result[i] = User(name: ("user" & $i).toOcheStr, age: i * 10, status: Active)
+
+# ─── seq view mode ────────────────────────────────────────────────────────────
+
+proc getPointsView(): seq[Point] {.oche: view, porche: view.} =
+  gPoints = @[Point(x: 1.0, y: 2.0), Point(x: 3.0, y: 4.0), Point(x: 5.0, y: 6.0)]
+  gPoints
+
+proc getUsersView(): seq[User] {.oche: view, porche: view.} =
+  gUsers = newSeq[User](3)
+  for i in 0..<3:
+    gUsers[i] = User(name: ("view_user" & $i).toOcheStr, age: (i+1)*11, status: Active)
+  gUsers
+
+# ─── OcheBuffer (share mode) ──────────────────────────────────────────────────
+
+proc makeIntBuffer(n: int): OcheBuffer[int] {.oche, porche.} =
+  gBuf = newOche[int](n)
+  for i in 0..<n: gBuf[i] = i * 3
+  gBuf
+
+proc makeParticleBuffer(n: int): OcheBuffer[Particle] {.oche, porche.} =
+  gParticleBuf = newOche[Particle](n)
+  for i in 0..<n:
+    gParticleBuf[i] = Particle(x: float64(i), y: float64(i)*0.5,
+                               mass: 1.0 + float64(i)*0.1,
+                               color: Color(i mod 3))
+  gParticleBuf
+
+proc makeUserBuffer(n: int): OcheBuffer[User] {.oche, porche.} =
+  gUserBuf = newOche[User](n)
+  for i in 0..<n:
+    gUserBuf[i] = User(name: ("buf_user" & $i).toOcheStr, age: i+20, status: Active)
+  gUserBuf
+
+# ─── OcheBuffer as INPUT param ────────────────────────────────────────────────
+
+proc sumIntBuffer(buf: OcheBuffer[int]): int {.oche, porche.} =
+  ## Accept an existing SharedListView/OcheBuffer and sum its values.
+  var total = 0
+  for i in 0..<buf.len: total += buf[i]
+  total
+
+proc doubleIntBuffer(buf: OcheBuffer[int]): OcheBuffer[int] {.oche, porche.} =
+  ## Take a buffer, return a new buffer with every element doubled.
+  let result_buf = newOche[int](buf.len)
+  # We need a global to keep it alive
+  gBuf = result_buf
+  for i in 0..<buf.len: gBuf[i] = buf[i] * 2
+  gBuf
+
+proc countActiveUsers(buf: OcheBuffer[User]): int {.oche, porche.} =
+  ## Count users with Active status in a User buffer.
+  var count = 0
+  for i in 0..<buf.len:
+    if buf[i].status == Active: inc count
+  count
+
+# ─── OcheArray (fast array input) ─────────────────────────────────────────────
+
+proc multiplyArray(arr: OcheArray[float64], factor: float64): OcheBuffer[float64] {.oche, porche.} =
+  var gFloatBuf {.global.}: OcheBuffer[float64]
+  gFloatBuf = newOche[float64](arr.len)
+  for i in 0..<arr.len: gFloatBuf[i] = arr[i] * factor
+  gFloatBuf
+
+proc dotProduct(a, b: OcheArray[float64]): float64 {.oche, porche.} =
+  ## Dot product of two arrays (must be same length).
+  var sum = 0.0
+  let n = min(a.len, b.len)
+  for i in 0..<n: sum += a[i] * b[i]
+  sum
+
+# ─── OchePtr (true zero-copy input) ───────────────────────────────────────────
+
+proc sumIntsPtr(arr: OchePtr[int]): int {.oche, porche.} =
+  var total = 0
+  for v in arr: total += v
+  total
+
+proc negateIntsPtr(arr: OchePtr[int]): OcheBuffer[int] {.oche, porche.} =
+  ## Return a new buffer with every element negated.
+  var gNegBuf {.global.}: OcheBuffer[int]
+  gNegBuf = newOche[int](arr.len)
+  for i in 0..<arr.len: gNegBuf[i] = -arr[i]
+  gNegBuf
+
+# ─── Error handling ───────────────────────────────────────────────────────────
+
+proc riskyDivide(a, b: int): int {.oche, porche.} =
+  if b == 0: raise newException(ValueError, "division by zero")
+  a div b
+
+proc riskyUser(name: string): User {.oche, porche.} =
+  if name.len == 0: raise newException(ValueError, "name cannot be empty")
+  User(name: name.toOcheStr, age: 1, status: Active)
+
+# ─── Mutation via view / share ────────────────────────────────────────────────
+
+proc resetPoint(p: Point): Point {.oche, porche.} =
+  ## Returns a zeroed copy — used to verify struct param pass-by-value.
+  Point(x: 0.0, y: 0.0)
+
+# ─── Generate ─────────────────────────────────────────────────────────────────
+
+generate("olib.dart")
+generatePython("olib.py")

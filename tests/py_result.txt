@@ -1,0 +1,203 @@
+
+────────────────────────────────────────────────────────────
+  Enums
+────────────────────────────────────────────────────────────
+  ✓  getColor() == Green
+  ✓  getStatus(active user) == Active
+
+────────────────────────────────────────────────────────────
+  Copy mode — single struct (POD)
+────────────────────────────────────────────────────────────
+  ✓  makePoint x
+  ✓  makePoint y
+  ✓  mutate Point.x
+  ✓  mutate Point.y
+  ✓  addPoints x
+  ✓  addPoints y
+  ✓  makeParticle x
+  ✓  makeParticle mass
+  ✓  makeParticle color (Blue=2)
+
+────────────────────────────────────────────────────────────
+  Copy mode — single struct (non-POD, has string)
+────────────────────────────────────────────────────────────
+  ✓  makeUser name
+  ✓  makeUser age
+  ✓  mutate User.name
+  ✓  mutate User.age
+  ✓  greetUser
+  ✓  makeTagged label
+  ✓  makeTagged point.x
+
+────────────────────────────────────────────────────────────
+  Copy mode — pass struct (User/UserView) to proc
+────────────────────────────────────────────────────────────
+  ✓  greetUser(User plain)
+  ✓  greetUser(UserView)
+
+────────────────────────────────────────────────────────────
+  Option return
+────────────────────────────────────────────────────────────
+  ✓  maybePoint(True) not None
+  ✓  maybePoint(True).x
+  ✓  maybePoint(True).y
+  ✓  maybePoint(False) is None
+  ✓  maybeUser('Eve') not None
+  ✓  maybeUser name
+  ✓  maybeUser('') is None
+
+────────────────────────────────────────────────────────────
+  Primitives and string
+────────────────────────────────────────────────────────────
+  ✓  addInts(3, 4)
+  ✓  addInts negative
+  ✓  mulFloat
+  ✓  echoStr
+  ✓  echoStr empty
+  ✓  sumSeq
+  ✓  sumSeq empty
+
+────────────────────────────────────────────────────────────
+  seq copy mode
+────────────────────────────────────────────────────────────
+  ✓  makePointList length
+  ✓  makePointList[0].x
+  ✓  makePointList[2].x
+  ✓  makePointList[4].y
+  ✓  mutate copy list elem
+  ✓  makeUserList length
+  ✓  makeUserList[0].name
+  ✓  makeUserList[3].age
+
+────────────────────────────────────────────────────────────
+  seq view mode (NativeListView)
+────────────────────────────────────────────────────────────
+  ✓  getPointsView returns NativeListView
+  ✓  view_pts length
+  ✓  view_pts[0].x
+  ✓  view_pts[1].y
+  ✓  view_pts[-1].x
+  ✓  slice len
+  ✓  slice[0].y
+  ✓  iteration x values
+  ✓  reversed[0].x
+  ✓  contains check
+  ✓  freeze().x
+  ✓  freeze().y
+  ✓  NativeListView setitem raises
+  ✓  getUsersView length
+  ✓  getUsersView[0].name
+  ✓  getUsersView[2].age
+  ✓  freeze User name
+  ✓  to_numpy not None for POD view
+  ✓  to_numpy length
+
+────────────────────────────────────────────────────────────
+  OcheBuffer (SharedListView) — int
+────────────────────────────────────────────────────────────
+  ✓  makeIntBuffer returns SharedListView
+  ✓  intbuf len
+  ✓  intbuf[0]
+  ✓  intbuf[1]
+  ✓  intbuf[5]
+  ✓  ibuf[2] after set
+  ✓  slice [1:4]
+  ✓  ibuf[0] after slice set
+  ✓  ibuf[1] after slice set
+  ✓  ibuf[-1]
+  ✓  sum(ibuf)
+  ✓  to_numpy not None
+  ✓  to_numpy length
+  ✓  to_numpy[5]
+  ✓  ibuf[5] after numpy mutation
+  ✓  ctx mgr buf[2]
+  ✓  ctx mgr freed (no crash)
+  ✓  ibuf.free() no crash
+
+────────────────────────────────────────────────────────────
+  OcheBuffer (SharedListView) — POD struct (Particle)
+────────────────────────────────────────────────────────────
+  ✓  particleBuf len
+  ✓  particleBuf[0].x
+  ✓  particleBuf[3].mass
+  ✓  particleBuf[2].color (Blue=2)
+  ✓  mutate particleBuf[0].x
+  ✓  to_numpy Particle not None
+  ✓  to_numpy Particle len
+  ✓  to_numpy has 'x' field
+  ✓  frozen Particle.x
+  ✓  frozen Particle.mass
+
+────────────────────────────────────────────────────────────
+  OcheBuffer (SharedListView) — non-POD struct (User)
+────────────────────────────────────────────────────────────
+  ✓  userBuf len
+  ✓  userBuf[0].name
+  ✓  userBuf[2].age
+  ✓  ubuf[0].name after mutation
+  ✓  to_numpy User returns None (non-POD)
+  ✓  frozen User name
+  ✓  greetUser(UserView from buf)
+
+────────────────────────────────────────────────────────────
+  OcheBuffer as INPUT param
+────────────────────────────────────────────────────────────
+  ✓  sumIntBuffer
+  ✓  doubleIntBuffer[0]
+  ✓  doubleIntBuffer[1]
+  ✓  doubleIntBuffer[4]
+  ✓  countActiveUsers (all Active)
+
+────────────────────────────────────────────────────────────
+  OcheArray — fast array input (numpy)
+────────────────────────────────────────────────────────────
+  ✓  dotProduct numpy arrays
+  ✓  multiplyArray returns SharedListView
+  ✓  multiplyArray len
+  ✓  multiplyArray[0]
+  ✓  multiplyArray[3]
+  ✓  dotProduct array.array
+
+────────────────────────────────────────────────────────────
+  OchePtr — true zero-copy (numpy/ctypes pointer)
+────────────────────────────────────────────────────────────
+  ✓  sumIntsPtr numpy
+  ✓  negateIntsPtr[0]
+  ✓  negateIntsPtr[4]
+  ✓  sumIntsPtr ctypes pointer
+
+────────────────────────────────────────────────────────────
+  Error handling
+────────────────────────────────────────────────────────────
+  ✓  riskyDivide ok
+  ✓  riskyDivide(1,0) raises RuntimeError
+  ✓  riskyUser ok name
+  ✓  riskyUser('') raises RuntimeError
+
+────────────────────────────────────────────────────────────
+  NativeListView — Sequence protocol extras
+────────────────────────────────────────────────────────────
+  ✓  index()
+  ✓  count()
+  ✓  len(list(reversed()))
+  ✓  __repr__
+
+────────────────────────────────────────────────────────────
+  SharedListView — MutableSequence protocol extras
+────────────────────────────────────────────────────────────
+  ✓  SLV index()
+  ✓  SLV count()
+  ✓  SLV __repr__
+  ✓  slice length mismatch raises
+
+────────────────────────────────────────────────────────────
+  numpy integration — benchmark context
+────────────────────────────────────────────────────────────
+  ✓  dotProduct 1M elements correct (5.6ms)
+  ✓  negateIntsPtr 1M elements [0]=0 (9.7ms)
+  ✓  negateIntsPtr 1M elements [-1]
+  ✓  numpy zero-copy write buf[0]
+  ✓  numpy zero-copy write buf[4]
+
+════════════════════════════════════════════════════════════
+  Results: 128/128 passed  ✓ All passed ✅
