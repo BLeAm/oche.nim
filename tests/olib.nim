@@ -43,7 +43,15 @@ type
 
 var gPoints: seq[Point]
 var gUsers: seq[User]
-var gBuf: OcheBuffer[int]
+
+# FIX: แยก global สำหรับแต่ละ proc ที่ return OcheBuffer[int]
+# เดิมใช้ gBuf ร่วมกันระหว่าง makeIntBuffer และ doubleIntBuffer
+# ทำให้ doubleIntBuffer ทับ pointer ที่ makeIntBuffer return ไปแล้ว
+var gIntBuf: OcheBuffer[int]
+var gDoubleBuf: OcheBuffer[int]
+var gFloatBuf {.global.}: OcheBuffer[float64]
+var gNegBuf {.global.}: OcheBuffer[int]
+
 var gParticleBuf: OcheBuffer[Particle]
 var gUserBuf: OcheBuffer[User]
 
@@ -123,9 +131,9 @@ proc getUsersView(): seq[User] {.oche: view, porche: view.} =
 # ─── OcheBuffer (share mode) ──────────────────────────────────────────────────
 
 proc makeIntBuffer(n: int): OcheBuffer[int] {.oche, porche.} =
-  gBuf = newOche[int](n)
-  for i in 0..<n: gBuf[i] = i * 3
-  gBuf
+  gIntBuf = newOche[int](n)
+  for i in 0..<n: gIntBuf[i] = i * 3
+  gIntBuf
 
 proc makeParticleBuffer(n: int): OcheBuffer[Particle] {.oche, porche.} =
   gParticleBuf = newOche[Particle](n)
@@ -151,11 +159,10 @@ proc sumIntBuffer(buf: OcheBuffer[int]): int {.oche, porche.} =
 
 proc doubleIntBuffer(buf: OcheBuffer[int]): OcheBuffer[int] {.oche, porche.} =
   ## Take a buffer, return a new buffer with every element doubled.
-  let result_buf = newOche[int](buf.len)
-  # We need a global to keep it alive
-  gBuf = result_buf
-  for i in 0..<buf.len: gBuf[i] = buf[i] * 2
-  gBuf
+  # FIX: ใช้ gDoubleBuf แยกจาก gIntBuf เพื่อไม่ให้ทับ pointer ที่ makeIntBuffer return ไปแล้ว
+  gDoubleBuf = newOche[int](buf.len)
+  for i in 0..<buf.len: gDoubleBuf[i] = buf[i] * 2
+  gDoubleBuf
 
 proc countActiveUsers(buf: OcheBuffer[User]): int {.oche, porche.} =
   ## Count users with Active status in a User buffer.
@@ -167,7 +174,6 @@ proc countActiveUsers(buf: OcheBuffer[User]): int {.oche, porche.} =
 # ─── OcheArray (fast array input) ─────────────────────────────────────────────
 
 proc multiplyArray(arr: OcheArray[float64], factor: float64): OcheBuffer[float64] {.oche, porche.} =
-  var gFloatBuf {.global.}: OcheBuffer[float64]
   gFloatBuf = newOche[float64](arr.len)
   for i in 0..<arr.len: gFloatBuf[i] = arr[i] * factor
   gFloatBuf
@@ -188,7 +194,6 @@ proc sumIntsPtr(arr: OchePtr[int]): int {.oche, porche.} =
 
 proc negateIntsPtr(arr: OchePtr[int]): OcheBuffer[int] {.oche, porche.} =
   ## Return a new buffer with every element negated.
-  var gNegBuf {.global.}: OcheBuffer[int]
   gNegBuf = newOche[int](arr.len)
   for i in 0..<arr.len: gNegBuf[i] = -arr[i]
   gNegBuf

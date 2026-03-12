@@ -21,3 +21,5 @@ debug.txt
 dresult.txt 
 src/benchmark
 py_result.txt
+tests/py_result.txt
+tests/dart_result.txt

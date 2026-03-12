@@ -1,135 +1,336 @@
-# oche
+# Oche
 
-> **Nim FFI codegen for Python and Dart** — write fast Nim, call it from Python or Dart with zero boilerplate.
+Nim FFI codegen for Python and Dart. Write Nim procs once, get idiomatic bindings for both languages — with a memory-aware ownership model that supports zero-copy paths to numpy and Dart TypedData.
 
-oche reads annotated Nim types and procs at **compile time** and generates a complete, idiomatic binding file (`nlib.dart` / `nlib.py`) that handles all marshalling, memory management, and lifetime tracking automatically. The Python companion is called **porche**.
+```nim
+# olib.nim
+proc dotProduct(a, b: OcheArray[float64]): float64 {.oche, porche.} =
+  var sum = 0.0
+  for i in 0..<min(a.len, b.len): sum += a[i] * b[i]
+  sum
+
+generate("olib.dart")
+generatePython("olib.py")
+```
+
+```python
+# Python — zero-copy from numpy
+import numpy as np
+from olib import porche
+
+a = np.array([1.0, 2.0, 3.0, 4.0])
+b = np.array([2.0, 3.0, 4.0, 5.0])
+print(porche.dotProduct(a, b))  # 40.0
+```
+
+```dart
+// Dart — zero-copy from TypedData
+final a = Float64List.fromList([1.0, 2.0, 3.0, 4.0]);
+final b = Float64List.fromList([2.0, 3.0, 4.0, 5.0]);
+print(oche.dotProduct(a, b)); // 40.0
+```
 
 ---
 
-## Why oche?
+## Why Oche?
 
-| | Pure Python / Dart | ctypes / dart:ffi by hand | **oche** |
+| | nimpy | ffigen | Oche |
 |---|---|---|---|
-| Speed | slow | native | native |
-| Boilerplate | none | enormous | **none** |
-| Memory safety | GC | manual | **automatic** |
-| Zero-copy arrays | ✗ | possible | **built-in** |
-| String fields | trivial | painful | **automatic** |
-| Struct mutation | trivial | painful | **automatic** |
+| Target | Python only | Dart only (from C header) | Python + Dart |
+| Source | Nim | C header | Nim |
+| Memory model | copy | copy | copy / view / share |
+| Zero-copy numpy/TypedData | ✗ | ✗ | ✓ |
+| ABI mismatch detection | ✗ | ✗ | ✓ |
 
 ---
 
-## Quick start
+## Installation
+
+Oche is a set of Nim source files — no package manager needed.
+
+```
+oche.nim        # main macro: {.oche.}, {.porche.}, generate(), generatePython()
+oche_core.nim   # compile-time IR shared by both emitters
+oche_dart.nim   # Dart FFI emitter
+oche_python.nim # Python ctypes emitter
+```
+
+Copy all four files into your project (or a shared location on `--path`).
+
+**Requirements:** Nim 2.x, standard library only.
+
+---
+
+## Quickstart
+
+### 1. Write your Nim library
 
 ```nim
 # mylib.nim
 import oche
+import std/options
 
 type
-  User {.oche, porche.} = object   # export to Dart and Python
-    name: string
-    age:  int
+  Color {.oche, porche.} = enum
+    Red, Green, Blue
 
-proc initUser(name: string, age: int): User {.oche, porche.} =
-  User(name: name.toOcheStr, age: age)
+  Point {.oche, porche.} = object
+    x: float64
+    y: float64
 
-proc greetUser(u: User): string {.oche, porche.} =
-  "Hello, " & $u.name
+proc makePoint(x, y: float64): Point {.oche, porche.} =
+  Point(x: x, y: y)
 
+proc addPoints(a, b: Point): Point {.oche, porche.} =
+  Point(x: a.x + b.x, y: a.y + b.y)
+
+# At the bottom — generates binding files at compile time
 generate("mylib.dart")
 generatePython("mylib.py")
 ```
 
+### 2. Compile to shared library
+
 ```bash
-nim c --app:lib --out:libmylib.so mylib.nim
+nim c --app:lib --gc:arc -d:release mylib.nim
+# produces: libmylib.so (Linux) / libmylib.dylib (macOS) / mylib.dll (Windows)
+# and generates: mylib.dart, mylib.py
 ```
 
-**Python**
+### 3. Use from Python
+
 ```python
-from mylib import porche
+from mylib import porche, Color
 
-u = porche.initUser("Alice", 30)
-print(u.name)          # Alice
-u.name = "Bob"         # mutable field
-print(porche.greetUser(u))
+p = porche.makePoint(3.0, 4.0)
+print(p.x, p.y)  # 3.0 4.0
+
+p2 = porche.makePoint(1.0, 2.0)
+p3 = porche.addPoints(p, p2)
+print(p3.x)  # 4.0
 ```
 
-**Dart**
+### 4. Use from Dart
+
 ```dart
 import 'mylib.dart';
 
-final u = oche.initUser("Alice", 30);
-print(u.name);         // Alice
-u.name = "Bob";        // mutable field
-print(oche.greetUser(u));
+void main() {
+  final p = oche.makePoint(3.0, 4.0);
+  print('${p.x} ${p.y}');  // 3.0 4.0
+
+  final p2 = oche.makePoint(1.0, 2.0);
+  final p3 = oche.addPoints(p, p2);
+  print(p3.x);  // 4.0
+}
 ```
-
----
-
-## Return type cheat-sheet
-
-| Nim return type | Python type | Dart type | Mutable | Freed by |
-|---|---|---|---|---|
-| `T` (struct) | `T` plain object | `T` class | ✅ | GC |
-| `string` | `str` | `String` | — | GC |
-| `seq[T]` copy | `List[T]` | `List<T>` | ✅ | GC |
-| `seq[T]` `{.view.}` | `NativeListView` | `NativeListView<TView>` | ❌ read-only | GC finalizer |
-| `OcheBuffer[T]` | `SharedListView` | `SharedListView<TView>` | ✅ | **`.free()` required** |
-| `Option[T]` | `T \| None` | `T?` | ✅ | GC |
-
-`TView` is a zero-copy window into Nim RAM. Call `.freeze()` on any `TView` to copy it into a GC-owned `T`.
-
----
-
-## Input param cheat-sheet
-
-| Nim param type | Python accepts | Dart accepts | Copies? |
-|---|---|---|---|
-| `T` (struct) | `T` or `TView` | `T` or `TView` | yes — pack to C struct |
-| `string` | `str` | `String` | yes — UTF-8 |
-| `seq[T]` | `list` | `List<T>` | yes — element loop |
-| `OcheArray[T]` | numpy / `array.array` | `Int64List` etc. | 1× memcpy |
-| `OchePtr[T]` | numpy / ctypes ptr | `ffi.Pointer<T>` | **zero-copy** |
 
 ---
 
 ## Pragma reference
 
+### Types
+
 ```nim
-# Types
-type Foo {.oche.}          = object ...   # Dart only
-type Foo {.oche, porche.}  = object ...   # Dart + Python
+type
+  MyEnum {.oche, porche.} = enum   # export to Dart + Python
+    A, B, C
 
-# Procs — copy mode (default)
-proc f(...) {.oche.}                      # Dart only
-proc f(...) {.oche, porche.}              # Dart + Python
+  MyStruct {.oche, porche.} = object  # export struct layout
+    x: float64
+    name: string   # string fields become cstring in ABI, managed automatically
+```
 
-# Procs — view / zero-copy mode
-proc f(...) {.oche: view.}                # Dart only, zero-copy return
-proc f(...) {.oche: view, porche: view.}  # Dart + Python, zero-copy return
+Use `{.oche.}` for Dart only, `{.porche.}` for Python only, or both for both targets.
+
+### Procs — three return modes
+
+```nim
+# Copy mode (default): Nim allocates, foreign lang gets an owned copy
+proc makeUser(name: string, age: int): User {.oche, porche.} = ...
+
+# View mode: return points into Nim-managed memory — no copy, no ownership transfer
+# Caller must not hold reference longer than the Nim-side data lives
+proc getPointsView(): seq[Point] {.oche: view, porche: view.} = ...
+
+# Share mode: return OcheBuffer — Nim-allocated heap block, caller calls .free()
+proc makeIntBuffer(n: int): OcheBuffer[int] {.oche, porche.} = ...
 ```
 
 ---
 
-## Project layout
+## Ownership model
+
+Oche has three types for crossing the language boundary, each with distinct ownership semantics:
+
+### `OcheBuffer[T]` — Nim owns, caller holds reference
+
+Nim allocates a contiguous block with a 16-byte header (`len int64`, `typeId int32`, `flags int32`) followed by element data. The foreign language receives a `SharedListView` (Dart) or `SharedListView` (Python) that wraps this pointer.
+
+**Caller is responsible for calling `.free()`** when done. A Dart `Finalizer` is registered as a safety net but `.free()` should be called explicitly for deterministic cleanup.
+
+```nim
+proc makeParticles(n: int): OcheBuffer[Particle] {.oche, porche.} =
+  var buf = newOche[Particle](n)
+  for i in 0..<n: buf[i] = Particle(x: float64(i), ...)
+  buf
+```
+
+```python
+buf = porche.makeParticles(100)
+print(buf[0].x)
+arr = buf.to_numpy()   # zero-copy view for POD types
+buf.free()
+```
+
+**Memory layout:**
+```
+offset 0   int64   length (number of elements)
+offset 8   int32   typeId (used by ocheFreeDeep for non-POD cleanup)
+offset 12  int32   flags
+offset 16  T[]     element data
+```
+
+### `OcheArray[T]` — caller owns, Nim reads
+
+Used for input parameters where the caller has an existing contiguous buffer (numpy array, Dart TypedData). Nim receives a pointer + length, never copies, never frees.
+
+```nim
+proc dotProduct(a, b: OcheArray[float64]): float64 {.oche, porche.} =
+  var sum = 0.0
+  for i in 0..<min(a.len, b.len): sum += a[i] * b[i]
+  sum
+```
+
+Python: pass `numpy.ndarray` or `array.array`  
+Dart: pass `Float64List`, `Int64List`, etc.
+
+### `OchePtr[T]` — caller owns native memory, true zero-copy
+
+For cases where the caller allocates with `malloc`/`calloc` and manages lifetime entirely. No length metadata on the wire — caller passes `len` as a separate parameter.
+
+```nim
+proc sumIntsPtr(arr: OchePtr[int]): int {.oche, porche.} =
+  var total = 0
+  for v in arr: total += v
+  total
+```
+
+Python: pass `numpy.ndarray` or `ctypes` pointer  
+Dart: pass `ffi.Pointer<ffi.Int64>` (from `calloc`)
+
+---
+
+## Type mapping
+
+| Nim | Python | Dart |
+|-----|--------|------|
+| `int` / `int64` | `int` | `int` |
+| `float64` | `float` | `double` |
+| `float32` | `float` | `double` |
+| `bool` | `bool` | `bool` |
+| `string` | `str` | `String` |
+| `enum` | `IntEnum` subclass | `enum` |
+| `object` | class with fields | class + NativeStruct |
+| `seq[T]` (copy) | `List[T]` | `List<T>` |
+| `seq[T]` (view) | `NativeListView[T]` | `NativeListView<T>` |
+| `OcheBuffer[T]` | `SharedListView[T]` | `SharedListView<T>` |
+| `OcheArray[T]` | `numpy.ndarray` / `array` | `TypedData` |
+| `OchePtr[T]` | `numpy.ndarray` / ctypes ptr | `ffi.Pointer<T>` |
+| `Option[T]` | `T \| None` | `T?` |
+
+---
+
+## Error handling
+
+Exceptions raised in Nim are caught at the FFI boundary and stored in a thread-local error slot. The generated binding checks this slot after every call and raises in the host language.
+
+```nim
+proc riskyDivide(a, b: int): int {.oche, porche.} =
+  if b == 0: raise newException(ValueError, "division by zero")
+  a div b
+```
+
+```python
+try:
+    porche.riskyDivide(1, 0)
+except RuntimeError as e:
+    print(e)  # NimError: division by zero
+```
+
+```dart
+try {
+  oche.riskyDivide(1, 0);
+} catch (e) {
+  print(e);  // NimError: division by zero
+}
+```
+
+> **Note:** The exception type is not currently propagated — the host language always sees `RuntimeError` (Python) or a generic exception (Dart). The original message is preserved.
+
+---
+
+## ABI safety
+
+Oche embeds a hash of all exported struct layouts and proc signatures at compile time (`ocheAbiHash`). When the generated binding is imported, it checks that the loaded `.so` hash matches. A mismatch means the library was recompiled without regenerating the bindings.
 
 ```
-oche.nim          # macros: {.oche.}, {.porche.}, generate(), generatePython()
-oche_core.nim     # compile-time IR (OcheType, OcheStruct, OcheObject …)
-oche_dart.nim     # Dart emitter
-oche_python.nim   # Python / ctypes emitter
+RuntimeError: Oche ABI mismatch: .so was compiled with hash 'a1b2c3d4'
+but bindings expect 'deadbeef'. Recompile Nim and regenerate bindings.
 ```
 
 ---
 
-## Requirements
+## numpy integration (Python)
 
-- Nim ≥ 2.0
-- Dart: `ffi: ^2.0.0` in `pubspec.yaml`
-- Python: standard library only (`ctypes`); numpy optional for zero-copy array paths
+For POD types (no string fields), `SharedListView` and `NativeListView` expose `.to_numpy()` which returns a zero-copy `numpy.ndarray` view over the Nim buffer.
+
+```python
+buf = porche.makeParticles(1000)
+arr = buf.to_numpy()      # dtype matches Particle struct layout
+print(arr['x'][0])        # field access by name
+arr['x'] *= 2.0           # mutate in place — writes through to Nim memory
+buf.free()
+```
+
+`to_numpy()` returns `None` for non-POD types (structs with string fields).
 
 ---
 
-## License
+## Scope and non-goals
 
-MIT
+Oche is an **in-process FFI binding generator**. It is not:
+
+- A serialization format (not Arrow, not Flatbuffers)
+- A concurrency primitive — thread safety is the caller's responsibility
+- A cross-process or cross-machine protocol
+
+The memory model is intentionally simple: one allocator (Nim's), one process, explicit ownership. Concurrency across Dart Isolates or Python threads sharing the same buffer is undefined behavior unless the caller provides external synchronization.
+
+---
+
+## Running the tests
+
+```bash
+# compile
+nim c --app:lib --gc:arc -d:release olib.nim
+
+# Python
+python orun.py
+
+# Dart
+dart pub add ffi        # one-time
+dart run orun.dart
+```
+
+Expected: `128/128 passed` (Python), `97/97 passed` (Dart).
+
+---
+
+## Known limitations
+
+- No callback/closure support — cannot pass Python/Dart lambdas to Nim
+- Exception type is not propagated, only the message
+- `NativeListView` negative indexing is supported in Python but not yet in Dart
+- No JS/WASM emitter
+- Thread safety is the caller's responsibility (by design — see Scope)
