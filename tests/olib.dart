@@ -27,7 +27,7 @@ String _ocheLibAbiHash() {
 void _ocheCheckAbi() {
   final libHash = _ocheLibAbiHash();
   if (libHash.isNotEmpty && libHash != _ocheExpectedAbiHash) {
-    throw StateError('Oche ABI mismatch: .so was compiled with hash \$libHash but bindings expect $_ocheExpectedAbiHash. Recompile Nim and regenerate bindings.');
+    throw StateError('Oche ABI mismatch: .so was compiled with hash \$libHash but bindings expect 00001505. Recompile Nim and regenerate bindings.');
   }
 }
 final _abiChecked = () { _ocheCheckAbi(); return true; }();
@@ -384,8 +384,6 @@ class SharedListView<T> extends OcheView<T> {
     else if (value is bool) { ffi.Pointer<ffi.Bool>.fromAddress(p.address).value = value; }
     else { throw UnsupportedError('Mutation via []= not supported for this type.'); }
   }
-  /// Returns a zero-copy typed data view into Nim RAM (primitives only).
-  /// Returns null for struct buffers (non-contiguous element types).
   typed_data.TypedData? toTypedData() {
     if (_ptr.address == 0) return null;
     final dataAddr = _ptr.address + 16;

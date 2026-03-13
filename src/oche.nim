@@ -1,14 +1,16 @@
 ## Oche: Nim FFI codegen for Dart and Python. Core in oche_core, emitters in oche_dart and oche_python.
+## Usage:
+##   {.oche.}        — export proc/type to all targets
+##   {.oche: view.}  — export proc to all targets, view mode (seq return is zero-copy)
+##   generate()      — emit all binding files, names derived from callsite filename
+##   generate(dart="path/api.dart", python="path/api.py")  — custom paths / select targets
 import std/[macros, os, strutils, tables, sequtils, hashes, algorithm]
 import oche_core
 import oche_dart
 import oche_python
-export oche_core.Backend
-
-var ocheFreeInjected {.compileTime.}: bool = false
 
 ## Build a short ABI fingerprint from all exported struct layouts and proc signatures.
-## Embedded in the generated file AND exported from the .so so mismatches are caught at load.
+## ooBanks is the single source of truth now — both targets share the same bank.
 proc buildAbiHash(): string {.compileTime.} =
   var parts: seq[string] = @[]
   for name, s in structBanks:
@@ -18,10 +20,6 @@ proc buildAbiHash(): string {.compileTime.} =
   for o in ooBanks:
     var line = "F:" & o.name & "(" & o.params.mapIt(it.typ.name).join(",") & "):" & o.retType.name
     parts.add line
-  for o in ooBanksPython:
-    var line = "P:" & o.name & "(" & o.params.mapIt(it.typ.name).join(",") & "):" & o.retType.name
-    parts.add line
-  # simple djb2-style hash over the sorted joined string
   let combined = parts.sorted.join("|")
   var h: uint32 = 5381
   for c in combined: h = h * 33 xor uint32(c.ord)
@@ -130,7 +128,7 @@ proc ocheGetError(): cstring {.exportc, dynlib.} =
 # proc ocheFreeDeep*(p: pointer) {.exportc: "ocheFreeDeep", dynlib, cdecl.} =
 #   if not p.isNil: dealloc(p)
 
-proc processOche(body: NimNode, isView: bool, backend: static Backend = bDart): NimNode {.compileTime.} =
+proc processOche(body: NimNode, isView: bool): NimNode {.compileTime.} =
   if body.kind == nnkTypeDef:
     var nameNode = body[0]; (if nameNode.kind == nnkPragmaExpr: nameNode = nameNode[0])
     let name = nameNode.strVal; let tyNode = body[2]
@@ -160,10 +158,10 @@ proc processOche(body: NimNode, isView: bool, backend: static Backend = bDart): 
       structBanks[name] = OcheStruct(name: name, typeId: structBanks.len + 1, fields: f, isPOD: pod)
       return newTree(nnkTypeDef, nameNode, newEmptyNode(), newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), newRec))
 
+  # Always register in both banks — targets are decided at generate() time, not here
   let obj = parseOche(body, isView)
-  if backend == bDart:     ooBanks.add(obj)
-  elif backend == bPython: ooBanksPython.add(obj)
-  else:                    ooBanks.add(obj); ooBanksPython.add(obj)
+  ooBanks.add(obj)
+  ooBanksPython.add(obj)
   let procName = body[0]; let originalBody = body[6]; var originalRetType = body[3][0]
   if originalRetType.kind == nnkEmpty: originalRetType = ident"void"
 
@@ -321,219 +319,37 @@ proc processOche(body: NimNode, isView: bool, backend: static Backend = bDart): 
 
   result = newTree(nnkProcDef, procName, newEmptyNode(), newEmptyNode(), ffiParams, newTree(nnkPragma, ident("exportc"), ident("dynlib")), newEmptyNode(), wrappedBody)
 
-# Check if a pragma list node contains a given pragma name
-proc hasPragma(pragmas: NimNode, name: string): bool {.compileTime.} =
-  if pragmas.kind != nnkPragma: return false
-  for p in pragmas:
-    if p.kind == nnkIdent and p.strVal == name: return true
-    if p.kind == nnkExprColonExpr and p[0].strVal == name: return true
-  false
-
-# Extract view flag from a pragma node (e.g. {.oche: view.} or {.porche: view.})
-proc pragmaIsView(pragmas: NimNode, name: string): bool {.compileTime.} =
-  if pragmas.kind != nnkPragma: return false
-  for p in pragmas:
-    if p.kind == nnkExprColonExpr and p[0].strVal == name:
-      if p[1].kind == nnkIdent and p[1].strVal == "view": return true
-  false
+## {.oche.} — export proc or type to all targets (Dart + Python)
+## {.oche: view.} — export seq-returning proc as zero-copy view (no allocation, Nim owns data)
+##
+## Types ({.oche.} on object/enum): register struct/enum layout for all emitters.
+## Procs ({.oche.} or {.oche: view.}): wrap proc with FFI ABI and register in both banks.
+## Target languages and output paths are decided at generate() time, not here.
 
 macro oche*(body: untyped): untyped =
-  # When used as {.oche, porche.} the pragma node on the proc is still intact
-  # at this point — we can peek at it before replacing the proc node.
-  var alsoPorche = false
-  var porcheView = false
-  if body.kind == nnkProcDef:
-    let pragmas = body[4]   # pragma list is index 4 on a ProcDef
-    alsoPorche = hasPragma(pragmas, "porche")
-    porcheView = pragmaIsView(pragmas, "porche")
-  if alsoPorche:
-    let obj = parseOche(body, porcheView)
-    ooBanksPython.add(obj)
-  processOche(body, false, bDart)
+  ## {.oche.} — plain export, copy mode for seq returns
+  processOche(body, false)
 
 macro oche*(arg: untyped, body: untyped): untyped =
+  ## {.oche: view.} — view mode: seq return is a zero-copy pointer into Nim memory
   var isView = false
   if arg.kind == nnkIdent and arg.strVal == "view": isView = true
-  var alsoPorche = false
-  var porcheView = false
-  if body.kind == nnkProcDef:
-    let pragmas = body[4]
-    alsoPorche = hasPragma(pragmas, "porche")
-    porcheView = pragmaIsView(pragmas, "porche")
-  if alsoPorche:
-    let obj = parseOche(body, porcheView)
-    ooBanksPython.add(obj)
-  processOche(body, isView, bDart)
+  processOche(body, isView)
 
-macro porche*(body: untyped): untyped =
-  if body.kind == nnkProcDef:
-    if hasPragma(body[4], "oche"):
-      ooBanks.add(parseOche(body, pragmaIsView(body[4], "oche")))
-  processOche(body, false, bPython)
 
-macro porche*(arg: untyped, body: untyped): untyped =
-  var isView = false
-  if arg.kind == nnkIdent and arg.strVal == "view": isView = true
-  if body.kind == nnkProcDef:
-    if hasPragma(body[4], "oche"):
-      ooBanks.add(parseOche(body, pragmaIsView(body[4], "oche")))
-  processOche(body, isView, bPython)
-
-## {.ocheAll.} / {.ocheAll: view.}
-## Registers the proc in BOTH Dart and Python banks in one pragma.
-## Use instead of {.oche, porche.} which silently drops porche due to
-## macro expansion order replacing the proc node before porche runs.
-macro ocheAll*(body: untyped): untyped =
-  ooBanks.add(parseOche(body, false))
-  ooBanksPython.add(parseOche(body, false))
-  processOche(body, false, bDart)   # bDart generates the actual exportc proc
-
-macro ocheAll*(arg: untyped, body: untyped): untyped =
-  var isView = false
-  if arg.kind == nnkIdent and arg.strVal == "view": isView = true
-  ooBanks.add(parseOche(body, isView))
-  ooBanksPython.add(parseOche(body, isView))
-  processOche(body, isView, bDart)
-
-macro generate*(output: static string): untyped =
-  
-  let
-    info = lineInfoObj(callsite())
-    libname = "lib" & info.filename.splitFile.name
-
-  var code = "//------------------ Generated by Oche ------------------\n"
-  code &= "//              Don't edit this file by hand!\n"
-  code &= "// ------------------------------------------------------\n"
-  let abiHash = buildAbiHash()
-  code &= "// ABI hash: " & abiHash & "\n"
-  code &= "import 'dart:ffi' as ffi;\nimport 'dart:io' show Platform;\nimport 'dart:collection';\nimport 'dart:typed_data' as typed_data;\nimport 'package:ffi/ffi.dart';\n\n"
-  code &= "final String _libName = Platform.isWindows ? '" & libname & ".dll' : (Platform.isMacOS ? '" & libname & ".dylib' : '" & libname & ".so');\n"
-  code &= "final dynlib = ffi.DynamicLibrary.open('./$_libName');\n"
-  code &= "final _ocheFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFree');\n"
-  code &= "final _ocheFreeDeep = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFreeDeep');\n"
-  code &= "final _ocheFreeInner = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer, ffi.Int32), void Function(ffi.Pointer, int)>('ocheFreeInner');\n"
-  code &= "final _ocheStrAlloc = dynlib.lookupFunction<ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8>), ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8>)>('ocheStrAlloc');\n"
-  code &= "final _ocheStrFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer<ffi.Void>), void Function(ffi.Pointer<ffi.Void>)>('ocheStrFree');\n"
-  code &= "final _ocheGetError = dynlib.lookupFunction<ffi.Pointer<Utf8> Function(), ffi.Pointer<Utf8> Function()>('ocheGetError');\n"
-  code &= "void _checkError() { final ptr = _ocheGetError(); if (ptr.address != 0) { final msg = ptr.toDartString(); _ocheFree(ptr); throw Exception('NimError: $msg'); } }\n"
-  # ABI guard: generated file hash must match the hash exported by the .so
-  code &= "const _ocheExpectedAbiHash = '" & abiHash & "';\n"
-  code &= "String _ocheLibAbiHash() {\n"
-  code &= "  try {\n"
-  code &= "    final fn = dynlib.lookupFunction<ffi.Pointer<Utf8> Function(), ffi.Pointer<Utf8> Function()>('ocheAbiHash');\n"
-  code &= "    return fn().toDartString();\n"
-  code &= "  } catch (_) { return ''; }\n"
-  code &= "}\n"
-  code &= "void _ocheCheckAbi() {\n"
-  code &= "  final libHash = _ocheLibAbiHash();\n"
-  code &= "  if (libHash.isNotEmpty && libHash != _ocheExpectedAbiHash) {\n"
-  code &= "    throw StateError('Oche ABI mismatch: .so was compiled with hash \\$libHash but bindings expect $_ocheExpectedAbiHash. Recompile Nim and regenerate bindings.');\n"
-  code &= "  }\n"
-  code &= "}\n"
-  code &= "final _abiChecked = () { _ocheCheckAbi(); return true; }();\n\n"
-
-  var inner = ""
-  for o in ooBanks: inner &= genDInterface(o)
-
-  for s in enumBanks.values: code &= genDEnum(s)
-  for s in structBanks.values: code &= genDStruct(s)
-  for t in typeDefBanks: code &= t & "\n"
-
-  code &= "final _finalizerDeep = Finalizer<ffi.Pointer<ffi.Void>>((ptr) => _ocheFreeDeep(ptr));\n\n" &
-          "abstract class OcheView<T> extends ListBase<T> {\n" &
-          "  ffi.Pointer<ffi.Void> get _nativePtr;\n" &
-          "  @override int get length;\n" &
-          "  @override set length(int value) => throw UnsupportedError('Cannot resize native buffer');\n" &
-          "  @override Iterator<T> get iterator => _NativeListIterator<T>(this);\n" &
-          "}\n\n" &
-          "class NativeListView<T> extends OcheView<T> {\n" &
-          "  ffi.Pointer<ffi.Void> _ptr;\n" &
-          "  final T Function(ffi.Pointer<ffi.Void> ptr) _unpacker;\n" &
-          "  final int _elemSize;\n" &
-          "  @override late final int length;\n" &
-          "  NativeListView(this._ptr, this._unpacker, this._elemSize) {\n" &
-          "    if (_ptr.address == 0) { length = 0; return; }\n" &
-          "    length = ffi.Pointer<ffi.Int64>.fromAddress(_ptr.address).value;\n" &
-          "    _finalizerDeep.attach(this, _ptr, detach: this);\n" &
-          "  }\n" &
-          "  @override ffi.Pointer<ffi.Void> get _nativePtr => _ptr;\n" &
-          "  @override T operator [](int index) {\n" &
-          "    if (_ptr.address == 0) throw StateError('NativeListView has been freed');\n" &
-          "    if (index < 0 || index >= length) throw RangeError.index(index, this);\n" &
-          "    return _unpacker(ffi.Pointer<ffi.Void>.fromAddress(_ptr.address + 16 + (index * _elemSize)));\n" &
-          "  }\n" &
-          "  @override void operator []=(int index, T value) => throw UnsupportedError('View mode is read-only. Use Buffer mode for mutation.');\n" &
-          "  void free() {\n" &
-          "    if (_ptr.address == 0) return;\n" &
-          "    _finalizerDeep.detach(this);\n" &
-          "    _ocheFreeDeep(_ptr);\n" &
-          "    _ptr = ffi.Pointer.fromAddress(0);\n" &
-          "  }\n" &
-          "}\n\n" &
-          "class SharedListView<T> extends OcheView<T> {\n" &
-          "  ffi.Pointer<ffi.Void> _ptr;\n" &
-          "  final T Function(ffi.Pointer<ffi.Void> ptr) _unpacker;\n" &
-          "  final void Function(ffi.Pointer<ffi.Void> ptr, dynamic value)? _packer;\n" &
-          "  final int _elemSize;\n" &
-          "  @override late final int length;\n" &
-          "  SharedListView(this._ptr, this._unpacker, this._packer, this._elemSize) {\n" &
-          "    if (_ptr.address == 0) { length = 0; return; }\n" &
-          "    length = ffi.Pointer<ffi.Int64>.fromAddress(_ptr.address).value;\n" &
-          "    _finalizerDeep.attach(this, _ptr, detach: this);\n" &
-          "  }\n" &
-          "  @override ffi.Pointer<ffi.Void> get _nativePtr => _ptr;\n" &
-          "  @override T operator [](int index) {\n" &
-          "    if (_ptr.address == 0) throw StateError('SharedListView has been freed');\n" &
-          "    if (index < 0 || index >= length) throw RangeError.index(index, this);\n" &
-          "    return _unpacker(ffi.Pointer<ffi.Void>.fromAddress(_ptr.address + 16 + (index * _elemSize)));\n" &
-          "  }\n" &
-          "  @override void operator []=(int index, dynamic value) {\n" &
-          "    if (_ptr.address == 0) throw StateError('SharedListView has been freed');\n" &
-          "    if (index < 0 || index >= length) throw RangeError.index(index, this);\n" &
-          "    final flags = ffi.Pointer<ffi.Int32>.fromAddress(_ptr.address + 12).value;\n" &
-          "    if ((flags & 1) != 0) throw StateError('Buffer is frozen (READ-ONLY)');\n" &
-          "    final p = ffi.Pointer<ffi.Void>.fromAddress(_ptr.address + 16 + (index * _elemSize));\n" &
-          "    if (_packer != null) { _packer!(p, value); }\n" &
-          "    else if (value is int) { ffi.Pointer<ffi.Int64>.fromAddress(p.address).value = value; }\n" &
-          "    else if (value is double) { ffi.Pointer<ffi.Double>.fromAddress(p.address).value = value; }\n" &
-          "    else if (value is bool) { ffi.Pointer<ffi.Bool>.fromAddress(p.address).value = value; }\n" &
-          "    else { throw UnsupportedError('Mutation via []= not supported for this type.'); }\n" &
-          "  }\n" &
-          "  /// Returns a zero-copy typed data view into Nim RAM (primitives only).\n" &
-          "  /// Returns null for struct buffers (non-contiguous element types).\n" &
-          "  typed_data.TypedData? toTypedData() {\n" &
-          "    if (_ptr.address == 0) return null;\n" &
-          "    final dataAddr = _ptr.address + 16;\n" &
-          "    if (_elemSize == 8) return ffi.Pointer<ffi.Int64>.fromAddress(dataAddr).asTypedList(length);\n" &
-          "    if (_elemSize == 4) return ffi.Pointer<ffi.Int32>.fromAddress(dataAddr).asTypedList(length);\n" &
-          "    if (_elemSize == 2) return ffi.Pointer<ffi.Int16>.fromAddress(dataAddr).asTypedList(length);\n" &
-          "    if (_elemSize == 1) return ffi.Pointer<ffi.Uint8>.fromAddress(dataAddr).asTypedList(length);\n" &
-          "    return null;\n" &
-          "  }\n" &
-          "  void free() {\n" &
-          "    if (_ptr.address == 0) return;\n" &
-          "    _finalizerDeep.detach(this);\n" &
-          "    _ocheFreeDeep(_ptr);\n" &
-          "    _ptr = ffi.Pointer.fromAddress(0);\n" &
-          "  }\n" &
-          "}\n\n" &
-          "class _NativeListIterator<T> implements Iterator<T> {\n" &
-          "  final OcheView<T> _view; int _index = -1;\n" &
-          "  _NativeListIterator(this._view);\n" &
-          "  @override T get current => _view[_index];\n" &
-          "  @override bool moveNext() => ++_index < _view.length;\n" &
-          "}\n"
-
-  code &= "class Oche {\n" & inner & "\n}\nfinal oche = Oche();\n"
-  writeFile(output, code)
-
+proc ocheInjectHelpers(): string {.compileTime.} =
+  ## Generate the Nim-side helper procs that get injected into the compiled .so.
+  ## Called once by generate(); the result is parsed at compile time so the procs
+  ## are available in the final binary.
   var free = "proc ocheFree(p: pointer) {.exportc, dynlib.} = (if not p.isNil: dealloc(p))\n"
+  free &= "proc ocheAllocBytes(n: csize_t): pointer {.exportc, dynlib.} = alloc0(n)\n"
   free &= "proc ocheStrAlloc(s: cstring): pointer {.exportc, dynlib.} =\n"
   free &= "  if s.isNil: return nil\n"
   free &= "  let n = s.len\n"
   free &= "  result = alloc0(n + 1)\n"
   free &= "  copyMem(result, s, n + 1)\n"
   free &= "proc ocheStrFree(p: pointer) {.exportc, dynlib.} = (if not p.isNil: dealloc(p))\n"
+  let abiHash = buildAbiHash()
   free &= "proc ocheAbiHash(): cstring {.exportc, dynlib.} = \"" & abiHash & "\"\n"
 
   for s in structBanks.values:
@@ -565,128 +381,257 @@ macro generate*(output: static string): untyped =
       free &= "      ocheFreeInner" & s.name & "(o)\n"
       free &= "    dealloc(p); return\n"
   free &= "  dealloc(p)\n"
+  result = free
 
-  # if not ocheFreeInjected: 
-  #   discard parseStmt(free)
-  #   ocheFreeInjected = true
+## generate() — emit Dart and/or Python bindings.
+##
+## Call at the bottom of your .nim file after all {.oche.} annotations.
+##
+##   generate()
+##     → emits <callsite>.dart and <callsite>.py  (both targets, auto-named)
+##
+##   generate(dart="path/api.dart")
+##     → emits Dart only, custom path
+##
+##   generate(python="path/api.py")
+##     → emits Python only, custom path
+##
+##   generate(dart="a.dart", python="b.py")
+##     → emits both, custom paths
+##
+## If dart= or python= is omitted the filename is derived from the callsite source file.
+## Passing an empty string "" explicitly disables that target.
 
-  let wrapper = """
-when not declared(ocheFree):
-  $1
-""" % [free]
-
-  discard parseStmt(wrapper)
-
-macro generatePython*(output: static string): untyped =
+macro generate*(dart: static string = "\x00", python: static string = "\x00"): untyped =
+  ## Emit Dart and/or Python FFI bindings.
+  ##
+  ##   generate()                         → both targets, names from callsite filename
+  ##   generate(dart="api.dart")          → Dart only
+  ##   generate(python="api.py")          → Python only
+  ##   generate(dart="a.dart", python="b.py") → both, custom names
   let
-    info = lineInfoObj(callsite())
-    libname = "lib" & info.filename.splitFile.name
+    info        = lineInfoObj(callsite())
+    stem        = info.filename.splitFile.name   # e.g. "olib"
+    libname     = "lib" & stem                   # e.g. "libolib"
+    # "\x00" means "omitted by caller"
+    dartOmitted   = dart   == "\x00"
+    pythonOmitted = python == "\x00"
+    # Both omitted → generate both auto-named.
+    # Only one given → generate only that target.
+    # Both given → generate both with given names.
+    dartOut   = if dartOmitted and pythonOmitted: stem & ".dart"  # both omitted
+                elif dartOmitted:                 ""               # python-only call
+                elif dart == "":                  stem & ".dart"   # dart="" → auto-name
+                else:                             dart             # explicit path
+    pythonOut = if dartOmitted and pythonOmitted: stem & ".py"    # both omitted
+                elif pythonOmitted:               ""               # dart-only call
+                elif python == "":                stem & ".py"     # python="" → auto-name
+                else:                             python           # explicit path
+    abiHash     = buildAbiHash()
 
-  var code = "# ------------------ Generated by Porche ------------------\n"
-  code &= "#              Don't edit this file by hand!\n"
-  code &= "# -----------------------------------------------------------\n"
-  let abiHashPy = buildAbiHash()
-  code &= "# ABI hash: " & abiHashPy & "\n"
-  code &= "from typing import Optional, Any, List, Union\n"
-  code &= "import ctypes\n"
-  code &= "import os\n\n"
-  code &= genPythonPrelude()
-  const ext = if hostOS == "windows": ".dll" elif hostOS == "macosx": ".dylib" else: ".so"
-  code &= "_lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '" & libname & ext & "')\n"
-  code &= "_lib = ctypes.CDLL(_lib_path)\n\n"
-  code &= "_lib.ocheFree.argtypes = [ctypes.c_void_p]\n"
-  code &= "_lib.ocheFree.restype = None\n"
-  code &= "_lib.ocheFreeDeep.argtypes = [ctypes.c_void_p]\n"
-  code &= "_lib.ocheFreeDeep.restype = None\n"
-  code &= "_ocheFreeInner = _lib.ocheFreeInner\n"
-  code &= "_ocheFreeInner.argtypes = [ctypes.c_void_p, ctypes.c_int32]\n"
-  code &= "_ocheFreeInner.restype = None\n"
-  code &= "_lib.ocheAllocBytes.argtypes = [ctypes.c_size_t]\n"
-  code &= "_lib.ocheAllocBytes.restype = ctypes.c_void_p\n"
-  code &= "_lib.ocheStrAlloc.argtypes = [ctypes.c_char_p]\n"
-  code &= "_lib.ocheStrAlloc.restype = ctypes.c_void_p\n"
-  code &= "_lib.ocheStrFree.argtypes = [ctypes.c_void_p]\n"
-  code &= "_lib.ocheStrFree.restype = None\n"
-  code &= "_oche_get_error = _lib.ocheGetError\n"
-  code &= "_oche_get_error.restype = ctypes.c_void_p\n"
-  code &= "def _check_error():\n"
-  code &= "    p = _oche_get_error()\n"
-  code &= "    if p is not None:\n"
-  code &= "        msg = ctypes.string_at(p).decode('utf-8')\n"
-  code &= "        _lib.ocheFree(p)\n"
-  code &= "        raise RuntimeError('NimError: ' + msg)\n\n"
-  # ABI guard: check at import time
-  code &= "_OCHE_EXPECTED_ABI_HASH = '" & abiHashPy & "'\n"
-  code &= "try:\n"
-  code &= "    _abi_fn = _lib.ocheAbiHash\n"
-  code &= "    _abi_fn.restype = ctypes.c_char_p\n"
-  code &= "    _lib_hash = _abi_fn().decode('utf-8')\n"
-  code &= "    if _lib_hash and _lib_hash != _OCHE_EXPECTED_ABI_HASH:\n"
-  code &= "        raise RuntimeError(\n"
-  code &= "            f'Oche ABI mismatch: .so was compiled with hash {_lib_hash!r} '\n"
-  code &= "            f'but bindings expect {_OCHE_EXPECTED_ABI_HASH!r}. '\n"
-  code &= "            'Recompile Nim and regenerate bindings.')\n"
-  code &= "except AttributeError:\n"
-  code &= "    pass  # older .so without ocheAbiHash — skip check\n\n"
-  for s in structBanks.values: code &= genPStruct(s)
-  for e in enumBanks.values: code &= genPEnum(e)
-  code &= "class Porche:\n"
-  if ooBanksPython.len == 0:
-    code &= "  pass\n"
-  for o in ooBanksPython:
-    code &= genPInterface(o)
-  code &= "\nporche = Porche()\n"
-  writeFile(output, code)
-
-  # Emit compile-time warnings for procs that used {.porche:view.} on a
-  # single-struct return — these are silently downgraded to copy mode.
   result = newStmtList()
-  for o in ooBanksPython:
-    if o.isView and structBanks.hasKey(o.retType.name):
-      let msg = "[Porche] '" & o.name &
-                "' returns single struct with {.porche:view.} — " &
-                "view mode is unsafe for stack-allocated returns. " &
-                "Downgraded to copy mode automatically."
-      result.add parseStmt("{.warning: \"" & msg & "\".}")
 
-  var free = "proc ocheFree(p: pointer) {.exportc, dynlib.} = (if not p.isNil: dealloc(p))\n"
-  free &= "proc ocheAllocBytes(n: csize_t): pointer {.exportc, dynlib.} = alloc0(n)\n"
-  free &= "proc ocheStrAlloc(s: cstring): pointer {.exportc, dynlib.} =\n"
-  free &= "  if s.isNil: return nil\n"
-  free &= "  let n = s.len\n"
-  free &= "  result = alloc0(n + 1)\n"
-  free &= "  copyMem(result, s, n + 1)\n"
-  free &= "proc ocheStrFree(p: pointer) {.exportc, dynlib.} = (if not p.isNil: dealloc(p))\n"
-  free &= "proc ocheAbiHash(): cstring {.exportc, dynlib.} = \"" & abiHashPy & "\"\n"
+  # ── Dart ─────────────────────────────────────────────────────────────────
+  if dartOut != "":
+    var code = "//------------------ Generated by Oche ------------------\n"
+    code &= "//              Don't edit this file by hand!\n"
+    code &= "// ------------------------------------------------------\n"
+    code &= "// ABI hash: " & abiHash & "\n"
+    code &= "import 'dart:ffi' as ffi;\nimport 'dart:io' show Platform;\nimport 'dart:collection';\nimport 'dart:typed_data' as typed_data;\nimport 'dart:typed_data';\nimport 'package:ffi/ffi.dart';\n\n"
+    code &= "final String _libName = Platform.isWindows ? '" & libname & ".dll' : (Platform.isMacOS ? '" & libname & ".dylib' : '" & libname & ".so');\n"
+    code &= "final dynlib = ffi.DynamicLibrary.open('./$_libName');\n"
+    code &= "final _ocheFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFree');\n"
+    code &= "final _ocheFreeDeep = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer), void Function(ffi.Pointer)>('ocheFreeDeep');\n"
+    code &= "final _ocheFreeInner = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer, ffi.Int32), void Function(ffi.Pointer, int)>('ocheFreeInner');\n"
+    code &= "final _ocheStrAlloc = dynlib.lookupFunction<ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8>), ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8>)>('ocheStrAlloc');\n"
+    code &= "final _ocheStrFree = dynlib.lookupFunction<ffi.Void Function(ffi.Pointer<ffi.Void>), void Function(ffi.Pointer<ffi.Void>)>('ocheStrFree');\n"
+    code &= "final _ocheGetError = dynlib.lookupFunction<ffi.Pointer<Utf8> Function(), ffi.Pointer<Utf8> Function()>('ocheGetError');\n"
+    code &= "void _checkError() { final ptr = _ocheGetError(); if (ptr.address != 0) { final msg = ptr.toDartString(); _ocheFree(ptr); throw Exception('NimError: $msg'); } }\n"
+    code &= "const _ocheExpectedAbiHash = '" & abiHash & "';\n"
+    code &= "String _ocheLibAbiHash() {\n"
+    code &= "  try {\n"
+    code &= "    final fn = dynlib.lookupFunction<ffi.Pointer<Utf8> Function(), ffi.Pointer<Utf8> Function()>('ocheAbiHash');\n"
+    code &= "    return fn().toDartString();\n"
+    code &= "  } catch (_) { return ''; }\n"
+    code &= "}\n"
+    code &= "void _ocheCheckAbi() {\n"
+    code &= "  final libHash = _ocheLibAbiHash();\n"
+    code &= "  if (libHash.isNotEmpty && libHash != _ocheExpectedAbiHash) {\n"
+    code &= "    throw StateError('Oche ABI mismatch: .so was compiled with hash \\$libHash but bindings expect " & abiHash & ". Recompile Nim and regenerate bindings.');\n"
+    code &= "  }\n"
+    code &= "}\n"
+    code &= "final _abiChecked = () { _ocheCheckAbi(); return true; }();\n\n"
 
-  for s in structBanks.values:
-    free &= "proc ocheFreeInner" & s.name & "(o: ptr " & s.name & ") = \n"
-    for f in s.fields:
-      if f.typ.name in ["string", "cstring"]:
-        free &= "  if not o." & f.name & ".isNil: dealloc(cast[pointer](o." & f.name & "))\n"
-      elif structBanks.hasKey(f.typ.name) and not structBanks[f.typ.name].isPOD:
-        free &= "  ocheFreeInner" & f.typ.name & "(addr o." & f.name & ")\n"
-    if s.fields.allIt(it.typ.name notin ["string", "cstring"] and (not structBanks.hasKey(it.typ.name) or structBanks[it.typ.name].isPOD)): free &= "  discard\n"
+    var inner = ""
+    var extensions = ""
+    for o in ooBanks:
+      let raw = genDInterface(o)
+      # Split on sentinel — part before sentinel goes inside class Oche,
+      # part after goes outside (top-level Dart extension declarations).
+      let parts = raw.split("\n##OCHE_EXT##\n")
+      inner &= parts[0]
+      if parts.len > 1: extensions &= parts[1]
 
-  free &= "proc ocheFreeInner(p: pointer, typeId: int32) {.exportc, dynlib.} = \n"
-  for s in structBanks.values:
-    free &= "  if typeId == " & $s.typeId & ": ocheFreeInner" & s.name & "(cast[ptr " & s.name & "](p)); return\n"
-  free &= "  discard\n\n"
+    for s in enumBanks.values: code &= genDEnum(s)
+    for s in structBanks.values: code &= genDStruct(s)
+    for t in typeDefBanks: code &= t & "\n"
 
-  free &= "proc ocheFreeDeep(p: pointer) {.exportc, dynlib.} = \n"
-  free &= "  if p.isNil: return\n"
-  free &= "  let flags = cast[ptr int32](cast[uint](p) + 12)[]\n"
-  free &= "  if (flags and int32(2)) != 0: dealloc(p); return\n"
-  free &= "  let L = cast[ptr int64](p)[]\n"
-  free &= "  let typeId = cast[ptr int32](cast[uint](p) + 8)[]\n"
-  for s in structBanks.values:
-    if not s.isPOD:
-      free &= "  if typeId == int32(" & $s.typeId & "):\n"
-      free &= "    let dataPtr = cast[uint](p) + 16\n"
-      free &= "    for i in 0 ..< L:\n"
-      free &= "      let o = cast[ptr " & s.name & "](dataPtr + uint(i * sizeof(" & s.name & ")))\n"
-      free &= "      ocheFreeInner" & s.name & "(o)\n"
-      free &= "    dealloc(p); return\n"
-  free &= "  dealloc(p)\n"
+    code &= "final _finalizerDeep = Finalizer<ffi.Pointer<ffi.Void>>((ptr) => _ocheFreeDeep(ptr));\n\n" &
+            "abstract class OcheView<T> extends ListBase<T> {\n" &
+            "  ffi.Pointer<ffi.Void> get _nativePtr;\n" &
+            "  @override int get length;\n" &
+            "  @override set length(int value) => throw UnsupportedError('Cannot resize native buffer');\n" &
+            "  @override Iterator<T> get iterator => _NativeListIterator<T>(this);\n" &
+            "}\n\n" &
+            "class NativeListView<T> extends OcheView<T> {\n" &
+            "  ffi.Pointer<ffi.Void> _ptr;\n" &
+            "  final T Function(ffi.Pointer<ffi.Void> ptr) _unpacker;\n" &
+            "  final int _elemSize;\n" &
+            "  @override late final int length;\n" &
+            "  NativeListView(this._ptr, this._unpacker, this._elemSize) {\n" &
+            "    if (_ptr.address == 0) { length = 0; return; }\n" &
+            "    length = ffi.Pointer<ffi.Int64>.fromAddress(_ptr.address).value;\n" &
+            "    _finalizerDeep.attach(this, _ptr, detach: this);\n" &
+            "  }\n" &
+            "  @override ffi.Pointer<ffi.Void> get _nativePtr => _ptr;\n" &
+            "  @override T operator [](int index) {\n" &
+            "    if (_ptr.address == 0) throw StateError('NativeListView has been freed');\n" &
+            "    if (index < 0 || index >= length) throw RangeError.index(index, this);\n" &
+            "    return _unpacker(ffi.Pointer<ffi.Void>.fromAddress(_ptr.address + 16 + (index * _elemSize)));\n" &
+            "  }\n" &
+            "  @override void operator []=(int index, T value) => throw UnsupportedError('View mode is read-only. Use Buffer mode for mutation.');\n" &
+            "  void free() {\n" &
+            "    if (_ptr.address == 0) return;\n" &
+            "    _finalizerDeep.detach(this);\n" &
+            "    _ocheFreeDeep(_ptr);\n" &
+            "    _ptr = ffi.Pointer.fromAddress(0);\n" &
+            "  }\n" &
+            "}\n\n" &
+            "class SharedListView<T> extends OcheView<T> {\n" &
+            "  ffi.Pointer<ffi.Void> _ptr;\n" &
+            "  final T Function(ffi.Pointer<ffi.Void> ptr) _unpacker;\n" &
+            "  final void Function(ffi.Pointer<ffi.Void> ptr, dynamic value)? _packer;\n" &
+            "  final int _elemSize;\n" &
+            "  @override late final int length;\n" &
+            "  SharedListView(this._ptr, this._unpacker, this._packer, this._elemSize) {\n" &
+            "    if (_ptr.address == 0) { length = 0; return; }\n" &
+            "    length = ffi.Pointer<ffi.Int64>.fromAddress(_ptr.address).value;\n" &
+            "    _finalizerDeep.attach(this, _ptr, detach: this);\n" &
+            "  }\n" &
+            "  @override ffi.Pointer<ffi.Void> get _nativePtr => _ptr;\n" &
+            "  @override T operator [](int index) {\n" &
+            "    if (_ptr.address == 0) throw StateError('SharedListView has been freed');\n" &
+            "    if (index < 0 || index >= length) throw RangeError.index(index, this);\n" &
+            "    return _unpacker(ffi.Pointer<ffi.Void>.fromAddress(_ptr.address + 16 + (index * _elemSize)));\n" &
+            "  }\n" &
+            "  @override void operator []=(int index, dynamic value) {\n" &
+            "    if (_ptr.address == 0) throw StateError('SharedListView has been freed');\n" &
+            "    if (index < 0 || index >= length) throw RangeError.index(index, this);\n" &
+            "    final flags = ffi.Pointer<ffi.Int32>.fromAddress(_ptr.address + 12).value;\n" &
+            "    if ((flags & 1) != 0) throw StateError('Buffer is frozen (READ-ONLY)');\n" &
+            "    final p = ffi.Pointer<ffi.Void>.fromAddress(_ptr.address + 16 + (index * _elemSize));\n" &
+            "    if (_packer != null) { _packer!(p, value); }\n" &
+            "    else if (value is int) { ffi.Pointer<ffi.Int64>.fromAddress(p.address).value = value; }\n" &
+            "    else if (value is double) { ffi.Pointer<ffi.Double>.fromAddress(p.address).value = value; }\n" &
+            "    else if (value is bool) { ffi.Pointer<ffi.Bool>.fromAddress(p.address).value = value; }\n" &
+            "    else { throw UnsupportedError('Mutation via []= not supported for this type.'); }\n" &
+            "  }\n" &
+            "  typed_data.TypedData? toTypedData() {\n" &
+            "    if (_ptr.address == 0) return null;\n" &
+            "    final dataAddr = _ptr.address + 16;\n" &
+            "    if (_elemSize == 8) return ffi.Pointer<ffi.Int64>.fromAddress(dataAddr).asTypedList(length);\n" &
+            "    if (_elemSize == 4) return ffi.Pointer<ffi.Int32>.fromAddress(dataAddr).asTypedList(length);\n" &
+            "    if (_elemSize == 2) return ffi.Pointer<ffi.Int16>.fromAddress(dataAddr).asTypedList(length);\n" &
+            "    if (_elemSize == 1) return ffi.Pointer<ffi.Uint8>.fromAddress(dataAddr).asTypedList(length);\n" &
+            "    return null;\n" &
+            "  }\n" &
+            "  void free() {\n" &
+            "    if (_ptr.address == 0) return;\n" &
+            "    _finalizerDeep.detach(this);\n" &
+            "    _ocheFreeDeep(_ptr);\n" &
+            "    _ptr = ffi.Pointer.fromAddress(0);\n" &
+            "  }\n" &
+            "}\n\n" &
+            "class _NativeListIterator<T> implements Iterator<T> {\n" &
+            "  final OcheView<T> _view; int _index = -1;\n" &
+            "  _NativeListIterator(this._view);\n" &
+            "  @override T get current => _view[_index];\n" &
+            "  @override bool moveNext() => ++_index < _view.length;\n" &
+            "}\n"
 
-  result = parseStmt(free)
+    code &= "class Oche {\n" & inner & "\n}\nfinal oche = Oche();\n"
+    if extensions.len > 0: code &= "\n" & extensions
+    writeFile(dartOut, code)
+
+  # ── Python ───────────────────────────────────────────────────────────────
+  if pythonOut != "":
+    var code = "# ------------------ Generated by Oche ------------------\n"
+    code &= "#              Don't edit this file by hand!\n"
+    code &= "# -------------------------------------------------------\n"
+    code &= "# ABI hash: " & abiHash & "\n"
+    code &= "from typing import Optional, Any, List, Union\n"
+    code &= "import ctypes\n"
+    code &= "import os\n\n"
+    code &= genPythonPrelude()
+    const ext = if hostOS == "windows": ".dll" elif hostOS == "macosx": ".dylib" else: ".so"
+    code &= "_lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '" & libname & ext & "')\n"
+    code &= "_lib = ctypes.CDLL(_lib_path)\n\n"
+    code &= "_lib.ocheFree.argtypes = [ctypes.c_void_p]\n"
+    code &= "_lib.ocheFree.restype = None\n"
+    code &= "_lib.ocheFreeDeep.argtypes = [ctypes.c_void_p]\n"
+    code &= "_lib.ocheFreeDeep.restype = None\n"
+    code &= "_ocheFreeInner = _lib.ocheFreeInner\n"
+    code &= "_ocheFreeInner.argtypes = [ctypes.c_void_p, ctypes.c_int32]\n"
+    code &= "_ocheFreeInner.restype = None\n"
+    code &= "_lib.ocheAllocBytes.argtypes = [ctypes.c_size_t]\n"
+    code &= "_lib.ocheAllocBytes.restype = ctypes.c_void_p\n"
+    code &= "_lib.ocheStrAlloc.argtypes = [ctypes.c_char_p]\n"
+    code &= "_lib.ocheStrAlloc.restype = ctypes.c_void_p\n"
+    code &= "_lib.ocheStrFree.argtypes = [ctypes.c_void_p]\n"
+    code &= "_lib.ocheStrFree.restype = None\n"
+    code &= "_oche_get_error = _lib.ocheGetError\n"
+    code &= "_oche_get_error.restype = ctypes.c_void_p\n"
+    code &= "def _check_error():\n"
+    code &= "    p = _oche_get_error()\n"
+    code &= "    if p is not None:\n"
+    code &= "        msg = ctypes.string_at(p).decode('utf-8')\n"
+    code &= "        _lib.ocheFree(p)\n"
+    code &= "        raise RuntimeError('NimError: ' + msg)\n\n"
+    code &= "_OCHE_EXPECTED_ABI_HASH = '" & abiHash & "'\n"
+    code &= "try:\n"
+    code &= "    _abi_fn = _lib.ocheAbiHash\n"
+    code &= "    _abi_fn.restype = ctypes.c_char_p\n"
+    code &= "    _lib_hash = _abi_fn().decode('utf-8')\n"
+    code &= "    if _lib_hash and _lib_hash != _OCHE_EXPECTED_ABI_HASH:\n"
+    code &= "        raise RuntimeError(\n"
+    code &= "            f'Oche ABI mismatch: .so was compiled with hash {_lib_hash!r} '\n"
+    code &= "            f'but bindings expect {_OCHE_EXPECTED_ABI_HASH!r}. '\n"
+    code &= "            'Recompile Nim and regenerate bindings.')\n"
+    code &= "except AttributeError:\n"
+    code &= "    pass  # older .so without ocheAbiHash — skip check\n\n"
+    for s in structBanks.values: code &= genPStruct(s)
+    for e in enumBanks.values: code &= genPEnum(e)
+    code &= "class Oche:\n"
+    if ooBanksPython.len == 0:
+      code &= "  pass\n"
+    for o in ooBanksPython:
+      code &= genPInterface(o)
+    code &= "\noche = Oche()\n"
+    writeFile(pythonOut, code)
+
+    # Emit compile-time warnings for procs that used {.oche: view.} on a
+    # single-struct return — silently downgraded to copy mode.
+    for o in ooBanksPython:
+      if o.isView and structBanks.hasKey(o.retType.name):
+        let msg = "[Oche] '" & o.name &
+                  "' returns single struct with {.oche: view.} — " &
+                  "view mode is unsafe for stack-allocated returns. " &
+                  "Downgraded to copy mode automatically."
+        result.add parseStmt("{.warning: \"" & msg & "\".}")
+
+  # ── Inject helper procs into the compiled .so ─────────────────────────────
+  # Indent every line of helpers so they sit inside the `when` block correctly
+  let helpers = ocheInjectHelpers()
+  let indented = helpers.strip().splitLines().mapIt("  " & it).join("\n")
+  let wrapper = "when not declared(ocheFree):\n" & indented
+  result.add parseStmt(wrapper)

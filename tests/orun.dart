@@ -319,6 +319,98 @@ void main() {
 
   calloc.free(buf);
 
+  // ── NativeListView — Sequence protocol extras ─────────────────────────────
+  section('NativeListView — Sequence protocol extras');
+
+  final viewPts2 = oche.getPointsView();
+
+  // contains
+  ok('contains check', viewPts2.any((p) => p.x == 1.0));
+  ok('contains check (false)', !viewPts2.any((p) => p.x == 99.0));
+
+  // firstWhere / indexOf equivalent
+  final idx = viewPts2.indexWhere((p) => p.x == 3.0);
+  eq('indexOf x==3.0', idx, 1);
+
+  // reversed
+  final rev = viewPts2.toList().reversed.toList();
+  approx('reversed[0].x', rev[0].x, 5.0);
+
+  // slice via sublist
+  final sl = viewPts2.sublist(1, 3);
+  eq('slice len', sl.length, 2);
+  approx('slice[0].y', sl[0].y, 4.0);
+
+  // where / map
+  final bigX = viewPts2.where((p) => p.x >= 3.0).toList();
+  eq('where x>=3 count', bigX.length, 2);
+
+  // __repr__ equivalent (toString)
+  ok('toString not empty', viewPts2.toString().isNotEmpty);
+
+  // ── SharedListView — MutableSequence protocol extras ──────────────────────
+  section('SharedListView — MutableSequence protocol extras');
+
+  final ibuf2 = oche.makeIntBuffer(6); // [0, 3, 6, 9, 12, 15]
+
+  // contains
+  ok('SLV contains 9', ibuf2.contains(9));
+  ok('SLV contains (false)', !ibuf2.contains(99));
+
+  // indexOf
+  final sidx = ibuf2.indexOf(9);
+  eq('SLV indexOf 9', sidx, 3);
+
+  // reversed
+  final srev = ibuf2.toList().reversed.toList();
+  eq('SLV reversed[0]', srev[0], 15);
+
+  // sublist (slice read)
+  final ssl = ibuf2.sublist(1, 4);
+  eq('SLV slice len', ssl.length, 3);
+  eq('SLV slice[0]', ssl[0], 3);
+
+  // toString
+  ok('SLV toString not empty', ibuf2.toString().isNotEmpty);
+
+  // []= on out-of-range index should throw RangeError
+  try {
+    ibuf2[ibuf2.length] = 999; // one past end — should throw
+    ok('SLV []= out-of-range throws', false);
+  } catch (e) {
+    ok('SLV []= out-of-range throws', e is RangeError);
+  }
+
+  // sum via fold
+  final s2 = ibuf2.fold<int>(0, (acc, v) => acc + v);
+  eq('SLV fold sum', s2, 0 + 3 + 6 + 9 + 12 + 15);
+
+  ibuf2.free();
+
+  // ── NativeListView — negative index (via length arithmetic) ───────────────
+  section('NativeListView — index extras');
+
+  final viewPts3 = oche.getPointsView();
+  // Dart has no native negative indexing, use length-based access
+  approx('view_pts[last].x', viewPts3[viewPts3.length - 1].x, 5.0);
+  approx('view_pts[last].y', viewPts3[viewPts3.length - 1].y, 6.0);
+
+  // OcheBuffer — particleBuf extras (mass field, color enum)
+  final pbuf2 = oche.makeParticleBuffer(4);
+  approx('particleBuf[3].mass', pbuf2[3].mass, 1.3, 1e-6);
+  eq('particleBuf[2].color (Blue=2)', pbuf2[2].color, Color.Blue);
+  pbuf2.free();
+
+  // OcheBuffer — int extras (slice, sum, free idempotent)
+  final ibuf3 = oche.makeIntBuffer(6); // [0,3,6,9,12,15]
+  final s3 = ibuf3.fold<int>(0, (acc, v) => acc + v);
+  eq('sum(ibuf)', s3, 45);
+  approx('ibuf[-1] via length', ibuf3[ibuf3.length - 1].toDouble(), 15.0);
+  ibuf3.free();
+  // free() idempotent — should not crash
+  ibuf3.free();
+  ok('ibuf.free() idempotent no crash', true);
+
   // ── Dart SharedListView Finalizer (smoke test) ─────────────────────────────
   section('SharedListView Finalizer (safety net smoke test)');
 

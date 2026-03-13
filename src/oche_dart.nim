@@ -301,5 +301,33 @@ proc genDInterface*(obj: OcheObject): string =
       "    " & prepWork.join("\n    ") & "\n" & body
     else: body
 
-  result = "  late final " & callName & " = dynlib.lookupFunction<N" & obj.name & "N, N" & obj.name & "D>('" & obj.name & "');\n\n" &
-           "  " & actualRetType & " " & obj.name & "(" & wrapperParams.join(", ") & ") {\n" & finalBody & "\n  }\n"
+  var procCode = "  late final " & callName & " = dynlib.lookupFunction<N" & obj.name & "N, N" & obj.name & "D>('" & obj.name & "');\n\n" &
+                "  " & actualRetType & " " & obj.name & "(" & wrapperParams.join(", ") & ") {\n" & finalBody & "\n  }\n"
+
+  # For procs that return OcheBuffer[T] where T is a primitive,
+  # generate a typed extension so callers can do buf.toInt64List() etc.
+  # without casting — fully type-safe, zero extra runtime cost.
+  if obj.retType.isShared and not structBanks.hasKey(obj.retType.inner):
+    let iI = obj.retType.inner
+    let (typedList, ffiType) =
+      case iI
+      of "int", "int64":    ("Int64List",   "ffi.Int64")
+      of "int32":            ("Int32List",   "ffi.Int32")
+      of "int16":            ("Int16List",   "ffi.Int16")
+      of "uint8", "byte":   ("Uint8List",   "ffi.Uint8")
+      of "float64", "float": ("Float64List", "ffi.Double")
+      of "float32":          ("Float32List", "ffi.Float")
+      else: ("", "")
+    if typedList != "":
+      # Append extension after a sentinel — generate macro will split on it
+      # so the extension ends up OUTSIDE class Oche.
+      procCode &= "\n##OCHE_EXT##\n" &
+        "extension " & obj.name & "Ext on " & actualRetType & " {\n" &
+        "  /// Zero-copy typed view into Nim RAM. Returns null if buffer is freed.\n" &
+        "  " & typedList & "? to" & typedList & "() {\n" &
+        "    if (_nativePtr.address == 0) return null;\n" &
+        "    return ffi.Pointer<" & ffiType & ">.fromAddress(_nativePtr.address + 16).asTypedList(length);\n" &
+        "  }\n" &
+        "}\n"
+
+  result = procCode
