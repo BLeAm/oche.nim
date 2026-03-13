@@ -68,6 +68,12 @@ proc `[]=`*[T](b: OcheBuffer[T], idx: int, val: T) =
   b.dataPtr[idx] = val
 
 ## OcheArray helpers — zero-copy view, never frees
+template dataPtr*[T](a: OcheArray[T] | OchePtr[T]): ptr UncheckedArray[T] =
+  ## Uniform access to the raw data pointer — mirrors OcheBuffer.dataPtr.
+  ## Use this for tight loops where you want compiler-visible pointer arithmetic:
+  ##   for i in 0..<a.len: a.dataPtr[i] *= 2
+  a.p
+
 proc `[]`*[T](a: OcheArray[T], idx: int): T =
   a.p[idx]
 

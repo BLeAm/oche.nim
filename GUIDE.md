@@ -32,8 +32,8 @@
 ## 1. What Oche is and isn't
 
 Oche is an **in-process FFI binding generator**. You write Nim procs and types,
-annotate them with pragmas, call `generate()` and `generatePython()` at the
-bottom of the file, and Oche emits `.dart` and `.py` binding files at compile
+annotate them with pragmas, call `generate()` at the bottom of the file,
+and Oche emits `.dart` and `.py` binding files at compile
 time. The output files wrap a compiled `.so` / `.dylib` / `.dll` and expose
 every annotated proc as a native method.
 
@@ -58,20 +58,20 @@ foreign language frontends**.
 ## 2. How codegen works
 
 At compile time, Nim's macro system runs and builds an internal IR (Intermediate
-Representation) of everything annotated with `{.oche.}` or `{.porche.}`.
+Representation) of everything annotated with `{.oche.}` or `{.oche.}`.
 
-The IR lives in three compile-time tables in `oche_core.nim`:
+The IR lives in two compile-time tables in `oche_core.nim`:
 
 ```
 structBanks   Table[string, OcheStruct]   # all annotated object types
 enumBanks     Table[string, OcheEnum]     # all annotated enum types
-ooBanks       seq[OcheObject]             # procs for Dart
-ooBanksPython seq[OcheObject]             # procs for Python
+ooBanks       seq[OcheObject]             # procs for both Dart and Python
+ooBanksPython seq[OcheObject]             # mirror of ooBanks (same contents)
 ```
 
-When you call `generate("mylib.dart")` or `generatePython("mylib.py")`, the
-macro walks these tables and emits the binding file as a string written to disk.
-It also injects several helper procs into the compiled `.so`:
+When you call `generate()`, the macro walks these tables and emits binding
+files as strings written to disk. It also injects several helper procs into
+the compiled `.so`:
 
 | Exported symbol | Purpose |
 |---|---|
@@ -95,9 +95,10 @@ user-defined proc names.
 
 ```nim
 type
-  MyEnum {.oche.} = enum          # Dart only
-  MyEnum {.porche.} = enum        # Python only
-  MyEnum {.oche, porche.} = enum  # both
+  MyEnum {.oche.} = enum   # register for all targets
+  MyPoint {.oche.} = object
+    x: float64
+    y: float64
 ```
 
 Same syntax for `object` types. The pragma must appear on the type definition
@@ -108,16 +109,25 @@ processed), but it is cleaner to annotate them explicitly.
 ### On procs
 
 ```nim
-proc myProc(...) {.oche.}           # Dart only
-proc myProc(...) {.porche.}         # Python only
-proc myProc(...) {.oche, porche.}   # both
-
-# view mode — seq return is a zero-copy view, not a copy
-proc myProc(...): seq[T] {.oche: view, porche: view.}
+proc myProc(...) {.oche.}           # export to all targets (Dart + Python)
+proc myProc(...): seq[T] {.oche: view.}  # view mode — zero-copy seq return
 ```
 
 The pragma value (`:view`) controls the return mode for seq returns.
 For non-seq returns the value is ignored. See section 4 for details.
+
+### generate()
+
+```nim
+generate()                              # emit <stem>.dart and <stem>.py
+generate(dart="path/api.dart")          # Dart only
+generate(python="path/api.py")          # Python only
+generate(dart="a.dart", python="b.py")  # both, custom paths
+```
+
+Call once at the bottom of the file after all `{.oche.}` annotations.
+The filename stem (e.g. `olib` from `olib.nim`) is used for auto-naming when
+a target is not explicitly disabled.
 
 ---
 
@@ -129,8 +139,8 @@ by the return type and the pragma value.
 ### Copy mode (default)
 
 ```nim
-proc makeUser(name: string, age: int): User {.oche, porche.}
-proc makePointList(n: int): seq[Point] {.oche, porche.}
+proc makeUser(name: string, age: int): User {.oche.}
+proc makePointList(n: int): seq[Point] {.oche.}
 ```
 
 Nim computes the result, then **copies all data** into a heap block that is
@@ -155,7 +165,7 @@ hold it longer than the Nim-side data would live.
 ### View mode
 
 ```nim
-proc getPointsView(): seq[Point] {.oche: view, porche: view.}
+proc getPointsView(): seq[Point] {.oche: view.}
 ```
 
 Nim returns a **pointer into its own memory** — no copy. The foreign side
@@ -187,8 +197,8 @@ a dangling pointer immediately.
 ### Share mode (OcheBuffer return)
 
 ```nim
-proc makeIntBuffer(n: int): OcheBuffer[int] {.oche, porche.}
-proc makeParticles(n: int): OcheBuffer[Particle] {.oche, porche.}
+proc makeIntBuffer(n: int): OcheBuffer[int] {.oche.}
+proc makeParticles(n: int): OcheBuffer[Particle] {.oche.}
 ```
 
 Nim allocates a heap block with a 16-byte header followed by the element data.
@@ -213,7 +223,7 @@ offset 16  T[]     element data, tightly packed
 - Supports `len()`, `[i]`, `[i] = v`, `[-1]`, `[a:b]`, `[a:b] = vals`
 - `.free()` — explicit free (preferred)
 - `__del__` — GC safety net (do not rely on this for timing)
-- `with porche.makeIntBuffer(n) as buf:` — context manager
+- `with oche.makeIntBuffer(n) as buf:` — context manager
 - `.to_numpy()` — zero-copy writable numpy view into Nim RAM (POD only)
 - `.freeze()` on element — deep copy to Python-owned object
 
@@ -234,7 +244,7 @@ how the foreign language passes array data to Nim.
 ### `seq[T]` parameter
 
 ```nim
-proc sumSeq(values: seq[int]): int {.oche, porche.}
+proc sumSeq(values: seq[int]): int {.oche.}
 ```
 
 The foreign side passes a Python list or Dart `List`. Oche allocates a
@@ -249,7 +259,7 @@ matches), or `array.array` (fast path via buffer protocol)
 ### `OcheArray[T]` parameter
 
 ```nim
-proc dotProduct(a, b: OcheArray[float64]): float64 {.oche, porche.}
+proc dotProduct(a, b: OcheArray[float64]): float64 {.oche.}
 ```
 
 Designed for **numeric arrays that already exist as contiguous buffers**.
@@ -275,8 +285,8 @@ Dart loop.
 ### `OchePtr[T]` parameter
 
 ```nim
-proc sumIntsPtr(arr: OchePtr[int]): int {.oche, porche.}
-proc negateIntsPtr(arr: OchePtr[int]): OcheBuffer[int] {.oche, porche.}
+proc sumIntsPtr(arr: OchePtr[int]): int {.oche.}
+proc negateIntsPtr(arr: OchePtr[int]): OcheBuffer[int] {.oche.}
 ```
 
 True zero-copy in both Python and Dart. Caller must provide memory that
@@ -293,8 +303,14 @@ lives **outside** the VM managed heap.
 
 **When to use over OcheArray:**
 Only when you need true zero-copy in Dart. The cost is that the Dart caller
-must manage `calloc` memory manually. In Python the difference between
+must manage `calloc` memory manually, and the Nim proc must accept `len` as a
+separate explicit parameter. In Python the performance difference between
 OcheArray and OchePtr is negligible — both give zero-copy with numpy.
+
+**Default recommendation:** use `OcheArray` unless you specifically need Dart
+zero-copy or C interop without a length concept. `OcheArray` is strictly more
+convenient: `.len` is free, caller API is simpler, and Dart callers do not need
+`calloc`.
 
 ---
 
@@ -311,8 +327,32 @@ This section answers the question: "which one do I use?"
 | `OcheArray[T]` | `ptr T, int64 len` (two args) | pointer to element 0, count |
 | `OchePtr[T]` | `ptr T, int64 len` (two args) | pointer to element 0, count |
 
-OcheArray and OchePtr are **identical on the wire**. The distinction exists
-only in the emitter: OcheArray causes a memcpy in Dart, OchePtr does not.
+OcheArray and OchePtr are **identical on the wire**. The distinctions exist
+only in the emitter and in what the caller can pass:
+
+- **OcheArray**: emitter injects `len` automatically from the array object.
+  Nim receives `ptr + len` and reconstructs `OcheArray[T]` with `.data` and
+  `.len` accessible. Caller never manually passes a length argument.
+- **OchePtr**: emitter does NOT inject `len`. Nim must declare `len` as an
+  explicit separate parameter. Caller must pass it manually.
+
+```nim
+# OcheArray — caller passes array only, len is injected automatically
+proc multiTwo(a: OcheArray[int]) {.oche.} =
+  for i in 0..<a.len:      # .len is available — injected by emitter
+    a.dataPtr[i] *= 2     # .dataPtr is ptr UncheckedArray[T], mutable via pointer
+
+# OchePtr — caller must pass len explicitly
+proc sumIntsPtr(p: OchePtr[int], n: int) {.oche.} =
+  let arr = cast[ptr UncheckedArray[int]](p)
+  for i in 0..<n: result += arr[i]
+```
+
+```python
+# Python callers:
+oche.multiTwo(narr)           # OcheArray — just the array
+oche.sumIntsPtr(narr, len(narr))  # OchePtr — must pass len too
+```
 
 ### Ownership matrix
 
@@ -371,11 +411,11 @@ This matters for:
 
 ```nim
 type
-  Point {.oche, porche.} = object
+  Point {.oche.} = object
     x: float64
     y: float64
 
-  User {.oche, porche.} = object
+  User {.oche.} = object
     name: string   # becomes cstring in the ABI
     age:  int
     status: Status
@@ -413,7 +453,7 @@ For every struct `Xxx`, the Python binding has **two classes**:
 
 ```nim
 type
-  Tagged {.oche, porche.} = object
+  Tagged {.oche.} = object
     point: Point   # inline — not a pointer
     label: string
 ```
@@ -428,7 +468,7 @@ struct will have a `Point_t` field at the correct offset. Accessing
 
 ```nim
 type
-  Color {.oche, porche.} = enum
+  Color {.oche.} = enum
     Red, Green, Blue
 ```
 
@@ -450,7 +490,7 @@ C strings (`cstring`/`char*`). Oche handles allocation on both sides.
 ### Input strings (param)
 
 ```nim
-proc greetUser(u: User): string {.oche, porche.}
+proc greetUser(u: User): string {.oche.}
 # User.name is a string field
 ```
 
@@ -461,7 +501,7 @@ when `ocheFreeDeep` runs on the result or when the struct's lifetime ends.
 ### Return strings
 
 ```nim
-proc echoStr(s: string): string {.oche, porche.}
+proc echoStr(s: string): string {.oche.}
 ```
 
 Nim returns a Nim-heap copy of the string (`toOcheStr`). The generated binding
@@ -471,7 +511,7 @@ the raw pointer. The foreign side only ever sees a decoded string value.
 ### The `toOcheStr` helper
 
 ```nim
-proc makeUser(name: string, age: int): User {.oche, porche.} =
+proc makeUser(name: string, age: int): User {.oche.} =
   User(name: name.toOcheStr, age: age, status: Active)
 ```
 
@@ -486,8 +526,8 @@ become invalid when the string's memory is reclaimed.
 ## 10. Option return
 
 ```nim
-proc maybePoint(give: bool): Option[Point] {.oche, porche.}
-proc maybeUser(name: string): Option[User] {.oche, porche.}
+proc maybePoint(give: bool): Option[Point] {.oche.}
+proc maybeUser(name: string): Option[User] {.oche.}
 ```
 
 `Option[T]` maps to nullable in both targets:
@@ -554,7 +594,7 @@ foreign side holds a reference. The standard pattern is a module-level global:
 ```nim
 var gPoints: seq[Point]  # keeps the seq alive
 
-proc getPointsView(): seq[Point] {.oche: view, porche: view.} =
+proc getPointsView(): seq[Point] {.oche: view.} =
   gPoints = @[Point(x: 1.0, y: 2.0), ...]
   gPoints  # returns pointer into gPoints
 ```
@@ -567,7 +607,7 @@ responsibility to ensure the view is not used after the backing data changes.
 ### Python context manager
 
 ```python
-with porche.makeIntBuffer(100) as buf:
+with oche.makeIntBuffer(100) as buf:
     buf[0] = 42
     process(buf)
 # buf.free() called automatically here
@@ -615,7 +655,7 @@ For POD types, `SharedListView.to_numpy()` returns a writable numpy view
 **directly into Nim RAM**:
 
 ```python
-buf = porche.makeParticleBuffer(1000)
+buf = oche.makeParticleBuffer(1000)
 arr = buf.to_numpy()  # dtype: [('x', '<f8'), ('y', '<f8'), ('mass', '<f8'), ('color', '<i4')]
 
 arr['x'] *= 2.0       # writes directly into Nim memory, no copy
@@ -633,7 +673,7 @@ will access freed memory. Always free after you're done with the numpy array.
 For view mode (`NativeListView`), `to_numpy()` returns a **copy**:
 
 ```python
-view = porche.getPointsView()
+view = oche.getPointsView()
 arr = view.to_numpy()   # returns a copy — safe to hold after view goes away
 ```
 
@@ -651,7 +691,7 @@ import numpy as np
 a = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float64)
 b = np.array([2.0, 3.0, 4.0, 5.0], dtype=np.float64)
 
-result = porche.dotProduct(a, b)  # zero-copy — numpy pointer passed directly
+result = oche.dotProduct(a, b)  # zero-copy — numpy pointer passed directly
 ```
 
 Oche checks that the array is contiguous (`array.data.contiguous`). If not,
@@ -662,19 +702,40 @@ call (it does, because the call is synchronous).
 
 ## 15. TypedData integration (Dart)
 
-### OcheBuffer → toTypedData()
+### OcheBuffer → typed extension methods
+
+For each proc that returns `OcheBuffer[T]` where T is a primitive, Oche
+generates a **typed extension method** specific to that proc's return type.
+This avoids manual casting and gives compile-time type safety:
 
 ```dart
-final buf = oche.makeIntBuffer(6);
-final td = buf.toTypedData() as Int64List;
+// Generated extension (example for makeIntBuffer):
+// extension makeIntBufferExt on SharedListView<int> {
+//   typed_data.Int64List? toInt64List() { ... }
+// }
 
-td[5] = 777;          // writes into Nim memory
+final buf = oche.makeIntBuffer(6);
+final arr = buf.toInt64List()!;   // Int64List — no cast needed ✓
+
+arr[5] = 777;         // writes into Nim memory — zero-copy
 buf[5];               // returns 777 — same memory
 buf.free();
 ```
 
-`toTypedData()` is a zero-copy view for primitive OcheBuffer types.
-For struct buffers it is not available.
+The method name is derived from the Dart typed list class:
+
+| Nim type | Method | Returns |
+|---|---|---|
+| `int` / `int64` | `toInt64List()` | `typed_data.Int64List?` |
+| `int32` | `toInt32List()` | `typed_data.Int32List?` |
+| `float64` / `float` | `toFloat64List()` | `typed_data.Float64List?` |
+| `float32` | `toFloat32List()` | `typed_data.Float32List?` |
+| `uint8` / `byte` | `toUint8List()` | `typed_data.Uint8List?` |
+| struct (any) | — not generated — | use `SharedListView<XxxView>` directly |
+
+`toTypedData()` (the untyped base method returning `typed_data.TypedData?`)
+is still available on `SharedListView` as a fallback but requires a cast.
+The typed extension methods are preferred.
 
 ### OcheArray input from TypedData
 
