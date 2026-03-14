@@ -230,7 +230,7 @@ proc genPStruct*(s: OcheStruct): string =
       let dc = toNumpyDtypeChar(f.typ.name)
       if dc != "":
         result &= "  ('" & f.name & "', " & dc & "),\n"
-    result &= "]) if _HAS_NUMPY else None\n"
+    result &= "], align=True) if _HAS_NUMPY else None\n"
   else:
     result &= "_NUMPY_DTYPE_" & s.name & " = None  # not POD (has strings/pointers)\n"
   result &= "\n"

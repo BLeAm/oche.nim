@@ -121,6 +121,16 @@ macro ocheId*(T: typedesc): int =
 template newOche*[T](n: int): OcheBuffer[T] =
   newOcheBuffer[T](n, typeId = ocheId(T))
 
+proc newOcheBufferUninitialized*[T](n: int, typeId: int = 0): OcheBuffer[T] =
+  let p = cast[ptr byte](alloc(16 + (n * sizeof(T))))  # ไม่ zero-fill
+  cast[ptr int64](p)[] = n
+  cast[ptr int32](cast[uint](p) + 8)[] = int32(typeId)
+  cast[ptr int32](cast[uint](p) + 12)[] = 0'i32       # flags ต้อง init เอง
+  OcheBuffer[T](p: p)
+
+template newOcheUInit*[T](n: int): OcheBuffer[T] =
+  newOcheBufferUninitialized[T](n, typeId = ocheId(T))
+
 proc ocheGetError(): cstring {.exportc, dynlib.} =
   if lastOcheError == "": return nil
   let L = lastOcheError.len

@@ -235,30 +235,37 @@ oche.multiTwo(Int64List.fromList([1, 2, 3]));  // one memcpy, then pointer to Ni
 - `a.dataPtr` — `ptr UncheckedArray[T]`, use for tight loops (compiler can vectorize)
 - `a[i]` — bounds-checked read (returns value, not var — use `a.dataPtr[i]` to mutate)
 
-### `OchePtr[T]` — caller owns native memory, true zero-copy
+### `OchePtr[T]` — caller owns native memory, true zero-copy in Dart
 
-Same wire format as `OcheArray` (`ptr + len`) but the emitter does **not** inject `len` —
-the Nim proc must declare it as an explicit separate parameter.
+Same wire format as `OcheArray` (`ptr + len`) and the Nim proc signature is also
+identical — neither type needs an explicit `len` parameter in Nim. The distinction
+is entirely in how the **Dart emitter** handles memory before the call.
+
+`OcheArray` in Dart performs a C-level memcpy into an arena buffer before calling Nim
+— necessary because Dart's VM is a moving GC and TypedData pointers can be relocated
+mid-call. `OchePtr` skips this: caller allocates via `calloc` (outside VM heap), so
+the pointer is stable and goes directly to Nim. Because `ffi.Pointer<T>` has no
+`.length`, the Dart caller must pass `len` explicitly.
 
 ```nim
-proc sumIntsPtr(p: OchePtr[int], n: int): int {.oche.} =
-  for i in 0..<n: result += p.dataPtr[i]
+proc sumIntsPtr(p: OchePtr[int]): int {.oche.} =
+  for i in 0..<p.len: result += p.dataPtr[i]  # .len available, same as OcheArray
 ```
 
 ```python
-oche.sumIntsPtr(narr, len(narr))   # must pass len explicitly
+oche.sumIntsPtr(narr)   # same as OcheArray — len injected automatically
 ```
 
 ```dart
 final buf = calloc<ffi.Int64>(5);
-oche.sumIntsPtr(buf, 5);           // true zero-copy — calloc is outside Dart VM heap
+oche.sumIntsPtr(buf, 5);   // len required — calloc pointer has no .length
 calloc.free(buf);
 ```
 
 **When to use `OchePtr` over `OcheArray`:**
-Only when you need true zero-copy in Dart (via `calloc`) or C interop without a
-length concept. Otherwise use `OcheArray` — it's simpler for all callers and `.len`
-is free.
+Only when the buffer is large enough that a memcpy per call is unacceptable, or when
+Dart and Nim need to share memory and see each other's mutations real-time. In Python
+there is no practical difference between the two.
 
 ---
 

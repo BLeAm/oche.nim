@@ -6,6 +6,7 @@ import 'dart:ffi' as ffi;
 import 'dart:io' show Platform;
 import 'dart:collection';
 import 'dart:typed_data' as typed_data;
+import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 final String _libName = Platform.isWindows ? 'libolib.dll' : (Platform.isMacOS ? 'libolib.dylib' : 'libolib.so');
@@ -654,3 +655,32 @@ class Oche {
 
 }
 final oche = Oche();
+
+extension makeIntBufferExt on SharedListView<int> {
+  /// Zero-copy typed view into Nim RAM. Returns null if buffer is freed.
+  Int64List? toInt64List() {
+    if (_nativePtr.address == 0) return null;
+    return ffi.Pointer<ffi.Int64>.fromAddress(_nativePtr.address + 16).asTypedList(length);
+  }
+}
+extension doubleIntBufferExt on SharedListView<int> {
+  /// Zero-copy typed view into Nim RAM. Returns null if buffer is freed.
+  Int64List? toInt64List() {
+    if (_nativePtr.address == 0) return null;
+    return ffi.Pointer<ffi.Int64>.fromAddress(_nativePtr.address + 16).asTypedList(length);
+  }
+}
+extension multiplyArrayExt on SharedListView<double> {
+  /// Zero-copy typed view into Nim RAM. Returns null if buffer is freed.
+  Float64List? toFloat64List() {
+    if (_nativePtr.address == 0) return null;
+    return ffi.Pointer<ffi.Double>.fromAddress(_nativePtr.address + 16).asTypedList(length);
+  }
+}
+extension negateIntsPtrExt on SharedListView<int> {
+  /// Zero-copy typed view into Nim RAM. Returns null if buffer is freed.
+  Int64List? toInt64List() {
+    if (_nativePtr.address == 0) return null;
+    return ffi.Pointer<ffi.Int64>.fromAddress(_nativePtr.address + 16).asTypedList(length);
+  }
+}

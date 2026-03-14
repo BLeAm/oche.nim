@@ -303,14 +303,14 @@ lives **outside** the VM managed heap.
 
 **When to use over OcheArray:**
 Only when you need true zero-copy in Dart. The cost is that the Dart caller
-must manage `calloc` memory manually, and the Nim proc must accept `len` as a
-separate explicit parameter. In Python the performance difference between
-OcheArray and OchePtr is negligible — both give zero-copy with numpy.
+must manage `calloc` memory manually and pass `len` explicitly. In Python
+there is no practical difference — both types are zero-copy with numpy.
 
-**Default recommendation:** use `OcheArray` unless you specifically need Dart
-zero-copy or C interop without a length concept. `OcheArray` is strictly more
-convenient: `.len` is free, caller API is simpler, and Dart callers do not need
-`calloc`.
+**Default recommendation:** use `OcheArray` — the Dart caller just passes a
+TypedData and the memcpy is negligible for typical sizes. Use `OchePtr` only
+when the buffer is large enough that a memcpy per call is unacceptable, or
+when Dart and Nim need to share memory and see each other's mutations
+real-time.
 
 ---
 
@@ -327,31 +327,31 @@ This section answers the question: "which one do I use?"
 | `OcheArray[T]` | `ptr T, int64 len` (two args) | pointer to element 0, count |
 | `OchePtr[T]` | `ptr T, int64 len` (two args) | pointer to element 0, count |
 
-OcheArray and OchePtr are **identical on the wire**. The distinctions exist
-only in the emitter and in what the caller can pass:
+OcheArray and OchePtr are **identical on the wire** — both send `ptr + len` to Nim, and the Nim proc signature requires no explicit `len` parameter for either type. The distinction exists entirely in **how the Dart emitter handles memory before the call**.
 
-- **OcheArray**: emitter injects `len` automatically from the array object.
-  Nim receives `ptr + len` and reconstructs `OcheArray[T]` with `.data` and
-  `.len` accessible. Caller never manually passes a length argument.
-- **OchePtr**: emitter does NOT inject `len`. Nim must declare `len` as an
-  explicit separate parameter. Caller must pass it manually.
+**OcheArray in Dart** — Dart's VM is a moving GC: objects in the VM heap can be relocated at any time. A raw pointer into a `Int64List` (VM heap) passed to Nim is unsafe — the GC may move it mid-call. The emitter always performs a single C-level memcpy into an arena buffer (outside VM heap) first. The Dart caller just passes a TypedData:
 
-```nim
-# OcheArray — caller passes array only, len is injected automatically
-proc multiTwo(a: OcheArray[int]) {.oche.} =
-  for i in 0..<a.len:      # .len is available — injected by emitter
-    a.dataPtr[i] *= 2     # .dataPtr is ptr UncheckedArray[T], mutable via pointer
-
-# OchePtr — caller must pass len explicitly
-proc sumIntsPtr(p: OchePtr[int], n: int) {.oche.} =
-  let arr = cast[ptr UncheckedArray[int]](p)
-  for i in 0..<n: result += arr[i]
+```dart
+oche.multiTwo(myInt64List);  // memcpy happens invisibly inside the binding
 ```
 
-```python
-# Python callers:
-oche.multiTwo(narr)           # OcheArray — just the array
-oche.sumIntsPtr(narr, len(narr))  # OchePtr — must pass len too
+**OchePtr in Dart** — caller allocates via `calloc`, which is outside the VM heap. The GC cannot touch it, so the pointer goes directly to Nim with no copy. Because `ffi.Pointer<T>` has no `.length` property, the emitter cannot inject `len` — the Dart caller must pass it explicitly:
+
+```dart
+final buf = calloc<ffi.Int64>(n);
+oche.sumIntsPtr(buf, n);   // len required in Dart because calloc has no .length
+calloc.free(buf);
+```
+
+**Python is unaffected** — numpy pins data in C heap, no moving GC, so both types accept the same inputs with `len` injected automatically.
+
+```nim
+# Nim proc signatures — identical for both types, no len param needed
+proc multiTwo(a: OcheArray[int]) {.oche.} =
+  for i in 0..<a.len: a.dataPtr[i] *= 2
+
+proc sumIntsPtr(p: OchePtr[int]): int {.oche.} =
+  for i in 0..<p.len: result += p.dataPtr[i]
 ```
 
 ### Ownership matrix
